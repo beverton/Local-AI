@@ -1,0 +1,45 @@
+{
+  "models": {
+    "qwen-2.5-3b": {
+      "name": "Qwen 2.5 3B",
+      "path": "G:\\KI Modelle\\coding\\qwen-2.5-3b",
+      "type": "qwen2",
+      "description": "Coding-spezialisiertes Modell"
+    },
+    "phi-3-mini-4k": {
+      "name": "Phi-3 Mini 4K Instruct",
+      "path": "G:\\KI Modelle\\science\\phi-3-mini-4k-instruct\\snapshots\\0a67737cc96d2554230f90338b163bc6380a2a85",
+      "type": "phi3",
+      "description": "Science-spezialisiertes Modell"
+    },
+    "mistral-7b-instruct": {
+      "name": "Mistral 7B Instruct",
+      "path": "G:\\KI Modelle\\chat\\mistral-7b-instruct\\snapshots\\3ad372fc79158a2148299e3318516c786aeded6c",
+      "type": "mistral",
+      "description": "Chat-optimiertes Modell mit CUDA-Unterstützung"
+    },
+    "flux-1-schnell": {
+      "name": "Flux 1 Schnell",
+      "path": "G:\\KI Modelle\\image\\flux-1-schnell",
+      "type": "image",
+      "description": "Bildgenerierung mit Flux 1 Schnell"
+    },
+    "whisper-large-v3": {
+      "name": "Whisper Large V3",
+      "path": "G:\\KI Modelle\\audio\\whisper-large-v3",
+      "type": "audio",
+      "description": "Spracherkennung mit Whisper Large V3"
+    }
+  },
+  "default_model": "qwen-2.5-3b",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "preferences": {
+    "enabled": false,
+    "file": "data/preferences.json"
+  }
+}
+
+

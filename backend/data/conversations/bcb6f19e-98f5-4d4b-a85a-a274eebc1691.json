@@ -1,0 +1,18 @@
+{
+  "id": "bcb6f19e-98f5-4d4b-a85a-a274eebc1691",
+  "title": "[Datei: light-beige-pastel-style (2).json]\n{\n  \"na...",
+  "created_at": "2025-12-20T23:33:47.294002",
+  "updated_at": "2025-12-20T23:33:52.885994",
+  "messages": [
+    {
+      "role": "user",
+      "content": "[Datei: light-beige-pastel-style (2).json]\n{\n  \"name\": \"Light Beige Pastel\",\n  \"version\": \"1.0\",\n  \"colors\": {\n    \"primary\": \"#f5e6d3\",\n    \"secondary\": \"#ffb3ba\",\n    \"tertiary\": \"#ffdfba\",\n    \"textLight\": \"#3b3b3b\",\n    \"textDark\": \"#4a4a4a\"\n  },\n  \"typography\": {\n    \"fontFamily\": \"'Inter', sans-serif\",\n    \"lineHeight\": 1.4\n  },\n  \"spacing\": {\n    \"borderRadius\": \"0.55rem\",\n    \"padding\": \"1.5rem\",\n    \"margin\": \"1rem\"\n  },\n  \"accessibility\": {\n... (6 weitere Zeilen)\n\nanalysiere",
+      "timestamp": "2025-12-20T23:33:52.884366"
+    },
+    {
+      "role": "assistant",
+      "content": "Das JSON-Dokument beschreibt eine Farbskala namens „Light Beiges Pastell“ mit verschiedenen Hintergrundfarben wie Primary, Secondary, Tertiary sowie Text-Farben in unterschiedlichen Schattierungen. Es enthält auch Informationen über die typografische Gestaltung, z.B. das gewählte Font und seine Linienhöhe, sowie Spacings zwischen Elementen im Layout.\nPullParser",
+      "timestamp": "2025-12-20T23:33:52.885988"
+    }
+  ]
+}

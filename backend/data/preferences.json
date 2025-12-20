@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "style_preferences": {},
+  "topic_preferences": {
+    "coding": 4
+  },
+  "format_preferences": {},
+  "system_prompt_additions": "Der Nutzer interessiert sich besonders für Programmierung."
+}

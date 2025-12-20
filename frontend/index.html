@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local AI - Ihr persönlicher AI-Assistent</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>Local AI</h1>
+                <button class="btn-new-chat" id="btnNewChat">+ Neues Gespräch</button>
+            </div>
+            
+            <div class="conversations-list" id="conversationsList">
+                <div class="loading">Lade Gespräche...</div>
+            </div>
+            
+            <div class="sidebar-footer">
+                <div class="model-selector">
+                    <label for="modelSelect">Modell:</label>
+                    <select id="modelSelect" class="model-select">
+                        <option value="">Lade Modelle...</option>
+                    </select>
+                </div>
+                
+                <div class="settings-toggle">
+                    <button class="btn-settings" id="btnSettings">⚙️ Einstellungen</button>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Chat Area -->
+        <main class="chat-container">
+            <div class="chat-header">
+                <h2 id="chatTitle">Neues Gespräch</h2>
+                <div class="header-right">
+                    <div class="system-stats" id="systemStats">
+                        <div class="stat-item">
+                            <span class="stat-label">CPU:</span>
+                            <span class="stat-value" id="cpuPercent">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">RAM:</span>
+                            <span class="stat-value" id="ramPercent">-</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">GPU:</span>
+                            <span class="stat-value" id="gpuPercent">-</span>
+                        </div>
+                    </div>
+                    <div class="status-indicator" id="statusIndicator">
+                        <span class="status-dot"></span>
+                        <span id="statusText">Bereit</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chat-messages" id="chatMessages">
+                <div class="welcome-message">
+                    <h3>Willkommen bei Local AI</h3>
+                    <p>Stellen Sie eine Frage oder starten Sie ein Gespräch.</p>
+                </div>
+            </div>
+            
+            <div class="chat-tabs">
+                <button class="tab-btn active" id="tabChat">💬 Chat</button>
+                <button class="tab-btn" id="tabImage">🖼️ Bild</button>
+            </div>
+            
+            <div class="chat-input-container" id="chatInputContainer">
+                <div class="file-upload-area" id="fileUploadArea">
+                    <input type="file" id="fileInput" accept=".csv,.txt,.json" style="display: none;" multiple>
+                    <button class="btn-upload" id="btnUpload" title="Datei hochladen">📎</button>
+                    <button class="btn-microphone" id="btnMicrophone" title="Spracheingabe">🎤</button>
+                    <div class="uploaded-files" id="uploadedFiles"></div>
+                </div>
+                <div class="input-wrapper">
+                    <textarea 
+                        id="messageInput" 
+                        placeholder="Nachricht eingeben... (Enter zum Senden, Shift+Enter für neue Zeile)"
+                        rows="1"
+                    ></textarea>
+                    <button class="btn-send" id="btnSend" disabled>➤</button>
+                    <button class="btn-cancel" id="btnCancel" style="display: none;">✕ Abbrechen</button>
+                </div>
+            </div>
+            
+            <div class="image-input-container" id="imageInputContainer" style="display: none;">
+                <div class="image-model-selector" style="margin-bottom: 10px;">
+                    <label for="imageModelSelect" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Bildgenerierungs-Modell:</label>
+                    <select id="imageModelSelect" class="model-select" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                        <option value="">Lade Modelle...</option>
+                    </select>
+                </div>
+                <div class="image-input-wrapper">
+                    <textarea 
+                        id="imagePromptInput" 
+                        placeholder="Beschreiben Sie das Bild, das Sie generieren möchten..."
+                        rows="3"
+                    ></textarea>
+                    <div class="image-controls">
+                        <button class="btn-generate-image" id="btnGenerateImage" disabled>🎨 Bild generieren</button>
+                        <button class="btn-cancel" id="btnCancelImage" style="display: none;">✕ Abbrechen</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Settings Panel (overlay) -->
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-content">
+                <div class="settings-header">
+                    <h2>Einstellungen</h2>
+                    <button class="btn-close" id="btnCloseSettings">×</button>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Preference Learning</h3>
+                    <div class="toggle-container">
+                        <label class="toggle">
+                            <input type="checkbox" id="preferenceToggle">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">Aus Interaktionen lernen</span>
+                    </div>
+                    <p class="setting-description">
+                        Die AI passt sich an Ihre Präferenzen an (Stil, Themen, etc.)
+                    </p>
+                    <button class="btn-reset" id="btnResetPreferences">Präferenzen zurücksetzen</button>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Generierung</h3>
+                    <div class="setting-item">
+                        <label for="temperatureSlider">Temperature: <span id="temperatureValue">0.3</span></label>
+                        <input type="range" id="temperatureSlider" min="0" max="1" step="0.1" value="0.3">
+                        <p class="setting-description">Kreativität der Antworten (0 = konservativ, 1 = kreativ)</p>
+                    </div>
+                    <div class="setting-item">
+                        <label for="maxLengthSlider">Max. Länge: <span id="maxLengthValue">512</span></label>
+                        <input type="range" id="maxLengthSlider" min="100" max="2048" step="100" value="512">
+                        <p class="setting-description">Maximale Länge der Antworten</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
+
