@@ -1,0 +1,19 @@
+# Basis-Dependencies für Text-Modelle (Qwen, Phi-3, Mistral)
+# Diese Dependencies sind immer nötig für den Local AI Service
+
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+transformers>=4.40.0
+torch>=2.0.0
+accelerate>=0.25.0
+pydantic>=2.9.0
+python-multipart>=0.0.6
+psutil>=5.9.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+
+
+
+
+

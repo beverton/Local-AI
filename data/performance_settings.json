@@ -1,0 +1,5 @@
+{
+  "cpu_threads": 12,
+  "gpu_optimization": "speed",
+  "disable_cpu_offload": true
+}

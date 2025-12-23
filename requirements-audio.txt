@@ -1,0 +1,14 @@
+# Dependencies für Audio (Whisper)
+# Nur installieren wenn Sie Whisper oder andere Audio-Modelle nutzen möchten
+
+openai-whisper>=20231117
+scipy>=1.11.0
+
+
+
+
+
+
+
+
+

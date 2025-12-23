@@ -38,3 +38,11 @@ Oder einfach das Terminal-Fenster schließen, in dem der Server läuft.
 - Prüfen Sie die Logs im Terminal
 
 
+
+
+
+
+
+
+
+

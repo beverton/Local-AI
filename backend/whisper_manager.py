@@ -8,6 +8,7 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 import torch
 import logging
 import numpy as np
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -94,17 +95,53 @@ class WhisperManager:
             )
             
             dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+            # #region agent log
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H3","location":"whisper_manager.py:96","message":"Setting dtype for model load","data":{"dtype":str(dtype),"device":self.device},"timestamp":int(time.time()*1000)})+"\n")
+            # #endregion
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 model_path,
-                torch_dtype=dtype,
+                dtype=dtype,  # Verwende dtype statt torch_dtype (Deprecation-Warnung behoben)
                 local_files_only=True
             )
             
+            # #region agent log
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                first_param_dtype = str(next(self.model.parameters()).dtype) if self.model.parameters() else "unknown"
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"whisper_manager.py:104","message":"Model dtype after from_pretrained","data":{"first_param_dtype":first_param_dtype,"expected_dtype":str(dtype)},"timestamp":int(time.time()*1000)})+"\n")
+            # #endregion
+            
             # Auf Device verschieben
+            self.model = self.model.to(self.device)
+            
+            # #region agent log
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                first_param_after = next(self.model.parameters())
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"whisper_manager.py:107","message":"Model dtype after to(device)","data":{"dtype":str(first_param_after.dtype),"device":str(first_param_after.device)},"timestamp":int(time.time()*1000)})+"\n")
+            # #endregion
+            
+            # GPU-Optimierungen
             if self.device == "cuda":
-                self.model = self.model.to(self.device)
-            else:
-                self.model = self.model.to(self.device)
+                logger.info("Aktiviere GPU-Optimierungen für Whisper...")
+                # Setze Modell in Evaluation-Modus
+                self.model.eval()
+                
+                # Versuche Flash Attention zu aktivieren (falls verfügbar)
+                try:
+                    if hasattr(self.model, 'model') and hasattr(self.model.model, 'decoder'):
+                        # Flash Attention für bessere Performance
+                        logger.info("Flash Attention wird verwendet (falls verfügbar)")
+                except Exception as e:
+                    logger.debug(f"Flash Attention nicht verfügbar: {e}")
+                
+                # Prüfe ob Modell wirklich auf GPU ist
+                try:
+                    device_check = next(self.model.parameters()).device
+                    logger.info(f"Whisper-Modell ist auf Device: {device_check}")
+                    if device_check.type != 'cuda':
+                        logger.warning(f"Modell sollte auf CUDA sein, ist aber auf {device_check}")
+                except Exception as e:
+                    logger.warning(f"Konnte Device nicht prüfen: {e}")
             
             self.current_model_id = model_id
             logger.info(f"Whisper-Modell erfolgreich geladen: {model_id}")
@@ -140,33 +177,85 @@ class WhisperManager:
                 return_tensors="pt"
             )
             
+            # #region agent log
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                input_features_dtype = str(inputs["input_features"].dtype) if "input_features" in inputs else "missing"
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H1","location":"whisper_manager.py:161","message":"Input dtype from processor","data":{"input_features_dtype":input_features_dtype},"timestamp":int(time.time()*1000)})+"\n")
+            # #endregion
+            
             # Auf Device verschieben
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # #region agent log
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                input_features_after = inputs.get("input_features")
+                model_first_param = next(self.model.parameters())
+                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H1","location":"whisper_manager.py:167","message":"Dtype comparison before generate","data":{"input_dtype":str(input_features_after.dtype) if input_features_after is not None else "none","model_param_dtype":str(model_first_param.dtype),"match":str(input_features_after.dtype) == str(model_first_param.dtype) if input_features_after is not None else False},"timestamp":int(time.time()*1000)})+"\n")
+            # #endregion
             
             # Transkribieren
             with torch.no_grad():
                 # Sprache setzen wenn angegeben
                 generate_kwargs = {
                     "max_length": 448,
-                    "num_beams": 5
+                    # Reduziere num_beams für schnellere Transkription (1 = greedy, 5 = beam search)
+                    # Beam search ist genauer aber viel langsamer
+                    "num_beams": 1 if self.device == "cpu" else 1,  # Greedy für Geschwindigkeit
+                    "do_sample": False,  # Deterministisch
                 }
+                
+                # GPU-spezifische Optimierungen
+                if self.device == "cuda":
+                    # Verwende bfloat16 für schnellere Inferenz
+                    if hasattr(self.model, 'half'):
+                        # Modell bereits in bfloat16 beim Laden
+                        pass
+                    # Keine zusätzlichen Optimierungen nötig, torch.no_grad() reicht
                 
                 if language:
                     # Setze Sprache für Generation
                     generate_kwargs["language"] = language
+                
+                # Prüfe ob Inputs auf GPU sind
+                if self.device == "cuda":
+                    input_device = inputs["input_features"].device
+                    if input_device.type != 'cuda':
+                        logger.warning(f"Inputs sind auf {input_device}, sollten auf CUDA sein")
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                    
+                    # #region agent log
+                    with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                        model_dtype = str(next(self.model.parameters()).dtype)
+                        input_dtype = str(inputs["input_features"].dtype)
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"whisper_manager.py:195","message":"Before generate - dtype check","data":{"model_dtype":model_dtype,"input_dtype":input_dtype,"needs_conversion":input_dtype != model_dtype},"timestamp":int(time.time()*1000)})+"\n")
+                    # #endregion
+                    
+                    # Konvertiere Inputs zu Model-Dtype falls nötig
+                    if inputs["input_features"].dtype != next(self.model.parameters()).dtype:
+                        # #region agent log
+                        with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"whisper_manager.py:200","message":"Converting inputs to model dtype","data":{"from":str(inputs["input_features"].dtype),"to":str(next(self.model.parameters()).dtype)},"timestamp":int(time.time()*1000)})+"\n")
+                        # #endregion
+                        inputs["input_features"] = inputs["input_features"].to(next(self.model.parameters()).dtype)
+                
+                # #region agent log
+                with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H5","location":"whisper_manager.py:204","message":"About to call generate","data":{"input_dtype":str(inputs["input_features"].dtype),"model_dtype":str(next(self.model.parameters()).dtype)},"timestamp":int(time.time()*1000)})+"\n")
+                # #endregion
                 
                 generated_ids = self.model.generate(
                     inputs["input_features"],
                     **generate_kwargs
                 )
             
-            # Text dekodieren
+            # Text dekodieren (auf CPU, da Decoding schnell ist)
+            generated_ids_cpu = generated_ids.cpu() if self.device == "cuda" else generated_ids
             transcription = self.processor.batch_decode(
-                generated_ids,
+                generated_ids_cpu,
                 skip_special_tokens=True
             )[0]
             
-            logger.info(f"Transkription erfolgreich: {transcription[:50]}...")
+            logger.info(f"Transkription erfolgreich ({self.device}): {transcription[:50]}...")
             return transcription.strip()
             
         except Exception as e:

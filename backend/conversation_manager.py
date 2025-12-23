@@ -23,23 +23,34 @@ class ConversationManager:
         """Stellt sicher, dass das Conversations-Verzeichnis existiert"""
         os.makedirs(self.conversations_dir, exist_ok=True)
     
-    def create_conversation(self, title: Optional[str] = None) -> str:
+    def create_conversation(self, title: Optional[str] = None, model_id: Optional[str] = None, conversation_type: str = "chat") -> str:
         """
         Erstellt eine neue Conversation
         
         Args:
             title: Optionaler Titel für die Conversation
+            model_id: Optionales Modell für die Conversation
+            conversation_type: Typ der Conversation ("chat" oder "image")
             
         Returns:
             Die ID der neuen Conversation
         """
         conversation_id = str(uuid.uuid4())
+        if not title:
+            if conversation_type == "image":
+                title = f"Bild {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            else:
+                title = f"Gespräch {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        
         conversation = {
             "id": conversation_id,
-            "title": title or f"Gespräch {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "title": title,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
-            "messages": []
+            "messages": [],
+            "model_id": model_id,  # Modell pro Conversation
+            "conversation_type": conversation_type,  # Typ der Conversation
+            "agent_mode": False  # Agent-Modus (Standard: deaktiviert)
         }
         
         self._save_conversation(conversation)
@@ -123,7 +134,9 @@ class ConversationManager:
                         "title": conversation["title"],
                         "created_at": conversation["created_at"],
                         "updated_at": conversation["updated_at"],
-                        "message_count": len(conversation.get("messages", []))
+                        "message_count": len(conversation.get("messages", [])),
+                        "model_id": conversation.get("model_id"),  # Modell-ID hinzufügen
+                        "conversation_type": conversation.get("conversation_type", "chat")  # Default zu "chat" für alte Conversations
                     })
         
         # Sortiere nach updated_at (neueste zuerst)
@@ -171,6 +184,78 @@ class ConversationManager:
             {"role": msg["role"], "content": msg["content"]}
             for msg in conversation.get("messages", [])
         ]
+    
+    def set_conversation_model(self, conversation_id: str, model_id: Optional[str]) -> bool:
+        """
+        Setzt das Modell für eine Conversation
+        
+        Args:
+            conversation_id: Die ID der Conversation
+            model_id: Die ID des Modells (None zum Entfernen)
+            
+        Returns:
+            True wenn erfolgreich
+        """
+        conversation = self.get_conversation(conversation_id)
+        if not conversation:
+            return False
+        
+        conversation["model_id"] = model_id
+        conversation["updated_at"] = datetime.now().isoformat()
+        self._save_conversation(conversation)
+        logger.info(f"Modell für Conversation {conversation_id} gesetzt: {model_id}")
+        return True
+    
+    def get_conversation_model(self, conversation_id: str) -> Optional[str]:
+        """
+        Gibt das Modell einer Conversation zurück
+        
+        Args:
+            conversation_id: Die ID der Conversation
+            
+        Returns:
+            Die Modell-ID oder None
+        """
+        conversation = self.get_conversation(conversation_id)
+        if not conversation:
+            return None
+        return conversation.get("model_id")
+    
+    def set_agent_mode(self, conversation_id: str, enabled: bool) -> bool:
+        """
+        Aktiviert oder deaktiviert den Agent-Modus für eine Conversation
+        
+        Args:
+            conversation_id: Die ID der Conversation
+            enabled: True um Agent-Modus zu aktivieren, False um zu deaktivieren
+            
+        Returns:
+            True wenn erfolgreich
+        """
+        conversation = self.get_conversation(conversation_id)
+        if not conversation:
+            return False
+        
+        conversation["agent_mode"] = enabled
+        conversation["updated_at"] = datetime.now().isoformat()
+        self._save_conversation(conversation)
+        logger.info(f"Agent-Modus für Conversation {conversation_id} gesetzt: {enabled}")
+        return True
+    
+    def get_agent_mode(self, conversation_id: str) -> bool:
+        """
+        Gibt den Agent-Modus-Status einer Conversation zurück
+        
+        Args:
+            conversation_id: Die ID der Conversation
+            
+        Returns:
+            True wenn Agent-Modus aktiviert ist, False sonst (auch wenn Conversation nicht existiert)
+        """
+        conversation = self.get_conversation(conversation_id)
+        if not conversation:
+            return False
+        return conversation.get("agent_mode", False)
     
     def _save_conversation(self, conversation: Dict[str, Any]):
         """Speichert eine Conversation in eine JSON-Datei"""

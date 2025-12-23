@@ -1,0 +1,26 @@
+{
+  "id": "896a72a1-ff74-4a59-a4a4-d4f86ec18e72",
+  "title": "woher kommen pinguine?",
+  "created_at": "2025-12-23T00:25:53.247083",
+  "updated_at": "2025-12-23T20:19:25.451826",
+  "messages": [
+    {
+      "role": "user",
+      "content": "woher kommen pinguine?",
+      "timestamp": "2025-12-23T00:26:00.145017"
+    },
+    {
+      "role": "assistant",
+      "content": "Pingüinos (Penguins) sind Vögel, die in den kühlen und gemäßigten Regionen der Südhalbkugel leben. Sie kommen hauptsächlich im Antarktis-Kontinent sowie an seinen umliegenden Inseln vor. Es gibt 18 Arten von Pingen, wobei einige auch in Südafrika, Neuseeland oder auf den Galapagos-Inseln vorkommen.\n\nDie meisten Pingearten ziehen ihre Jungen in Kolonien in Nester aus Stein, Sand oder Schnee auf.",
+      "timestamp": "2025-12-23T00:27:18.770913"
+    },
+    {
+      "role": "user",
+      "content": "welche thesen gibt es dazu wie sich die Pinguine in dieses extreme klima entwickelt haben. Wer waren ihre Vorfahren und wie haben diese gelebt?",
+      "timestamp": "2025-12-23T20:19:25.451808"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "agent_mode": false
+}

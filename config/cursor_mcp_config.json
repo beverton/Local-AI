@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "local-ai": {
+      "command": "python",
+      "args": [
+        "ABSOLUTER_PFAD_ZUM_PROJEKT\\backend\\mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "ABSOLUTER_PFAD_ZUM_PROJEKT\\backend"
+      }
+    }
+  }
+}
+

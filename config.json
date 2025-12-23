@@ -39,6 +39,20 @@
   "preferences": {
     "enabled": false,
     "file": "data/preferences.json"
+  },
+  "model_service": {
+    "host": "127.0.0.1",
+    "port": 8001,
+    "auto_start": true,
+    "client_cleanup_interval": 300
+  },
+  "temp_directory": "G:\\KI Modelle\\KI-Temp",
+  "image_generation": {
+    "resolution_presets": {
+      "s": 512,
+      "m": 720,
+      "l": 1024
+    }
   }
 }
 

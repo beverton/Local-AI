@@ -1,14 +1,17 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-transformers>=4.40.0
-torch>=2.0.0
-accelerate>=0.25.0
-pydantic>=2.9.0
-python-multipart>=0.0.6
-psutil>=5.9.0
-diffusers>=0.21.0
-pillow>=10.0.0
-protobuf>=4.21.0
-xformers>=0.0.23
-scipy>=1.11.0
+# Haupt-Requirements - installiert alle Dependencies
+# Für minimale Installation siehe requirements-base.txt
+# 
+# Installation:
+#   pip install -r requirements.txt          # Installiert alles
+#   pip install -r requirements-base.txt    # Nur Basis (Text-Modelle)
+#   pip install -r requirements-base.txt -r requirements-image.txt  # Basis + Bildgenerierung
+#   pip install -r requirements-base.txt -r requirements-audio.txt   # Basis + Audio
 
+# Basis (Text-Modelle) - immer nötig
+-r requirements-base.txt
+
+# Bildgenerierung (optional - nur wenn Flux genutzt wird)
+-r requirements-image.txt
+
+# Audio (optional - nur wenn Whisper genutzt wird)
+-r requirements-audio.txt

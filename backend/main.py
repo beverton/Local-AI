@@ -7,62 +7,49 @@ import os
 import logging
 import subprocess
 
-# #region agent log
-log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.cursor', 'debug.log')
-try:
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    # Use unbuffered mode to prevent terminal flicker
-    with open(log_path, 'a', encoding='utf-8', buffering=0) as f:
-        log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"main.py:10","message":"Script started","data":{"cwd":os.getcwd(),"script_path":__file__},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-        f.write(log_entry.encode('utf-8'))
-except Exception:
-    # Silent fail - don't print to console or cause flicker
-    pass
-# #endregion
-
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 import csv
 import io
 
-# #region agent log
-try:
-    with open(log_path, 'ab') as f:
-        log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"main.py:25","message":"FastAPI imports successful","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-        f.write(log_entry.encode('utf-8'))
-except: pass
-# #endregion
-
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# #region agent log
-try:
-    with open(log_path, 'ab') as f:
-        log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"main.py:30","message":"Before local imports","data":{"sys_path":sys.path},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-        f.write(log_entry.encode('utf-8'))
-except: pass
-# #endregion
 
 from model_manager import ModelManager
 from conversation_manager import ConversationManager
 from preference_learner import PreferenceLearner
-from image_manager import ImageManager
+
+# Logger muss vor dem try-except verfügbar sein
+import logging
+logging.basicConfig(level=logging.INFO)
+_temp_logger = logging.getLogger(__name__)
+
+# ImageManager optional importieren (kann ohne diffusers fehlschlagen)
+try:
+    from image_manager import ImageManager
+except Exception as e:
+    _temp_logger.warning(f"ImageManager konnte nicht geladen werden: {e}")
+    _temp_logger.warning("Bildgenerierung wird nicht verfügbar sein")
+    ImageManager = None
+
 from whisper_manager import WhisperManager
+from agent_manager import AgentManager
+from agent_tools import (
+    initialize_tools, read_file, write_file, execute_code, generate_image, 
+    describe_image, call_agent, web_search, list_directory, delete_file, file_exists
+)
+from model_service_client import ModelServiceClient
 import psutil
 import torch
 import numpy as np
 from scipy.io import wavfile
-
-# #region agent log
-try:
-    with open(log_path, 'ab') as f:
-        log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"main.py:35","message":"Local imports successful","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-        f.write(log_entry.encode('utf-8'))
-except: pass
-# #endregion
+from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,19 +67,261 @@ app.add_middleware(
 
 # Manager initialisieren (mit korrekten Pfaden)
 config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+workspace_root = os.path.dirname(os.path.dirname(__file__))
+
+# Lade Config für Model-Service
+try:
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    model_service_config = config.get("model_service", {})
+    model_service_host = model_service_config.get("host", "127.0.0.1")
+    model_service_port = model_service_config.get("port", 8001)
+except:
+    model_service_host = "127.0.0.1"
+    model_service_port = 8001
+    config = {}
+
+# Helper-Funktion für Temp-Verzeichnis
+def get_temp_directory() -> str:
+    """
+    Gibt das konfigurierte Temp-Verzeichnis zurück.
+    Erstellt das Verzeichnis falls es nicht existiert.
+    Fallback auf System-Temp bei Fehlern.
+    
+    Returns:
+        Pfad zum Temp-Verzeichnis
+    """
+    default_temp_dir = "G:\\KI Modelle\\KI-Temp"
+    
+    try:
+        # Lade aus Config
+        temp_dir = config.get("temp_directory", default_temp_dir)
+        
+        # Erstelle Verzeichnis falls nicht vorhanden
+        if temp_dir and not os.path.exists(temp_dir):
+            try:
+                os.makedirs(temp_dir, exist_ok=True)
+                logger.info(f"Temp-Verzeichnis erstellt: {temp_dir}")
+            except (OSError, PermissionError) as e:
+                logger.warning(f"Konnte Temp-Verzeichnis nicht erstellen: {temp_dir} - {e}. Verwende System-Temp.")
+                import tempfile
+                return tempfile.gettempdir()
+        
+        return temp_dir
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden des Temp-Verzeichnisses aus Config: {e}. Verwende System-Temp.")
+        import tempfile
+        return tempfile.gettempdir()
+
+def sanitize_filename(text: str, max_length: int = 50) -> str:
+    """
+    Konvertiert Text zu einem gültigen Dateinamen.
+    Entfernt Sonderzeichen und begrenzt die Länge.
+    
+    Args:
+        text: Der zu konvertierende Text
+        max_length: Maximale Länge des Dateinamens (ohne Extension)
+        
+    Returns:
+        Sanitized Dateiname
+    """
+    import re
+    # Entferne Sonderzeichen, behalte nur Buchstaben, Zahlen, Leerzeichen, Bindestriche, Unterstriche
+    sanitized = re.sub(r'[^\w\s-]', '', text)
+    # Ersetze Leerzeichen durch Unterstriche
+    sanitized = re.sub(r'\s+', '_', sanitized)
+    # Entferne mehrfache Unterstriche
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Entferne führende/abschließende Unterstriche
+    sanitized = sanitized.strip('_')
+    # Begrenze Länge
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip('_')
+    return sanitized if sanitized else "image"
+
+def save_generated_image(image: Image.Image, prompt: str, temp_dir: Optional[str] = None) -> Optional[str]:
+    """
+    Speichert ein generiertes Bild mit Timestamp und Prompt im Dateinamen.
+    
+    Args:
+        image: Das PIL Image
+        prompt: Der Prompt-Text für den Dateinamen
+        temp_dir: Optionales Temp-Verzeichnis (wird aus Config geladen wenn None)
+        
+    Returns:
+        Pfad zur gespeicherten Datei oder None bei Fehler
+    """
+    try:
+        if temp_dir is None:
+            temp_dir = get_temp_directory()
+        
+        # Erstelle Unterordner für generierte Bilder
+        images_dir = os.path.join(temp_dir, "generated_images")
+        os.makedirs(images_dir, exist_ok=True)
+        
+        # Erstelle Dateinamen: timestamp_sanitized_prompt.png
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        sanitized_prompt = sanitize_filename(prompt, max_length=50)
+        filename = f"{timestamp}_{sanitized_prompt}.png"
+        
+        # Vollständiger Pfad
+        file_path = os.path.join(images_dir, filename)
+        
+        # Speichere Bild
+        image.save(file_path, format="PNG")
+        logger.info(f"Bild gespeichert: {file_path}")
+        return file_path
+        
+    except Exception as e:
+        logger.warning(f"Fehler beim Speichern des Bildes: {e}")
+        return None
+
+# Model-Service-Client initialisieren
+model_service_client = ModelServiceClient(host=model_service_host, port=model_service_port)
+
+# Lokale Manager (für Fallback oder direkte Nutzung)
 model_manager = ModelManager(config_path=config_path)
 conversation_manager = ConversationManager()
 preference_learner = PreferenceLearner()
-image_manager = ImageManager(config_path=config_path)
+
+# ImageManager initialisieren (mit Fehlerbehandlung)
+
+image_manager = None
+if ImageManager:
+    try:
+        
+        image_manager = ImageManager(config_path=config_path)
+        
+        logger.info("ImageManager erfolgreich initialisiert")
+    except Exception as e:
+        
+        logger.error(f"Fehler bei ImageManager-Initialisierung: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        image_manager = None
+else:
+    
+    logger.warning("ImageManager-Klasse nicht verfügbar (Import fehlgeschlagen)")
+
+
 whisper_manager = WhisperManager(config_path=config_path)
+agent_manager = AgentManager()
+
+# Prüfe ob Model-Service verfügbar ist
+USE_MODEL_SERVICE = model_service_client.is_available()
+if USE_MODEL_SERVICE:
+    logger.info("Model-Service ist verfügbar - nutze Model-Service für Modell-Operationen")
+else:
+    logger.warning("Model-Service ist nicht verfügbar - nutze lokale Manager (Fallback)")
+
+def check_model_service_available() -> bool:
+    """Prüft dynamisch ob Model-Service verfügbar ist (kann sich zur Laufzeit ändern)"""
+    return model_service_client.is_available()
+
+# Thread Pool für Modell-Laden (damit UI nicht blockiert)
+model_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model_loader")
+image_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="image_loader")
+audio_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio_loader")
+
+# Lade-Status für alle Manager
+loading_status = {
+    "text_model": {"loading": False, "model_id": None, "error": None, "conversation_id": None, "start_time": None},
+    "image_model": {"loading": False, "model_id": None, "error": None, "conversation_id": None, "start_time": None},
+    "audio_model": {"loading": False, "model_id": None, "error": None, "conversation_id": None, "start_time": None}
+}
+
+# Tools initialisieren
+if image_manager:
+    initialize_tools(model_manager, image_manager, agent_manager, workspace_root)
+else:
+    logger.warning("ImageManager nicht verfügbar - Tools werden ohne Bildgenerierung initialisiert")
+    # Initialisiere Tools ohne image_manager (wird in agent_tools.py gehandhabt)
+    initialize_tools(model_manager, None, agent_manager, workspace_root)
+
+# Tools registrieren
+agent_manager.register_tool("read_file", read_file)
+agent_manager.register_tool("write_file", write_file)
+agent_manager.register_tool("execute_code", execute_code)
+agent_manager.register_tool("generate_image", generate_image)
+agent_manager.register_tool("describe_image", describe_image)
+agent_manager.register_tool("call_agent", call_agent)
+agent_manager.register_tool("web_search", web_search)
+agent_manager.register_tool("list_directory", list_directory)
+agent_manager.register_tool("delete_file", delete_file)
+agent_manager.register_tool("file_exists", file_exists)
+
+# Agent-Typen registrieren
+from agents import PromptAgent, ImageAgent, VisionAgent, ChatAgent
+from pipeline_manager import PipelineManager
+
+agent_manager.register_agent_type("prompt_agent", "Prompt Agent", 
+                                  "Erstellt detaillierte Bildbeschreibungen/Prompts aus Text", 
+                                  "text", PromptAgent)
+agent_manager.register_agent_type("image_agent", "Image Agent", 
+                                  "Generiert Bilder basierend auf Prompts", 
+                                  "image", ImageAgent)
+agent_manager.register_agent_type("vision_agent", "Vision Agent", 
+                                  "Beschreibt generierte Bilder", 
+                                  "text", VisionAgent)
+agent_manager.register_agent_type("chat_agent", "Chat Agent", 
+                                  "Normaler Chat mit automatischer Tool-Unterstützung (WebSearch, Dateimanipulation)", 
+                                  "text", ChatAgent)
+
+# Pipeline Manager
+pipeline_manager = PipelineManager(agent_manager)
+
+# Helper-Funktion um Agent-Manager zu setzen
+def set_agent_managers(agent_instance):
+    """Setzt die Manager für einen Agent"""
+    agent_instance.set_model_manager(model_manager)
+    agent_instance.set_agent_manager(agent_manager)
+    if image_manager:
+        agent_instance.set_image_manager(image_manager)
+
+# Helper-Funktion zum sicheren Löschen von Dateien (mit Retry)
+def _safe_delete_file(file_path: str, max_retries: int = 3, delay: float = 0.1):
+    """
+    Löscht eine Datei sicher mit Retry-Mechanismus.
+    Wichtig für Windows, wo Dateien manchmal noch geöffnet sind.
+    
+    Args:
+        file_path: Pfad zur zu löschenden Datei
+        max_retries: Maximale Anzahl von Versuchen
+        delay: Wartezeit zwischen Versuchen in Sekunden
+    """
+    if not file_path or not os.path.exists(file_path):
+        return
+    
+    import time
+    for attempt in range(max_retries):
+        try:
+            os.unlink(file_path)
+            return  # Erfolgreich gelöscht
+        except (OSError, PermissionError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(delay * (attempt + 1))  # Exponentielles Backoff
+            else:
+                # Letzter Versuch fehlgeschlagen - logge Warnung aber wirf keinen Fehler
+                logger.warning(f"Konnte temporäre Datei nicht löschen nach {max_retries} Versuchen: {file_path} - {e}")
+        except Exception as e:
+            # Unerwarteter Fehler - logge aber wirf keinen Fehler
+            logger.warning(f"Unerwarteter Fehler beim Löschen von {file_path}: {e}")
+            return
+
+# Setze Manager-Funktion für Pipeline Manager
+pipeline_manager.set_managers_func(set_agent_managers)
 
 
 # Request/Response Models
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
-    max_length: int = 512
+    max_length: int = 2048
     temperature: float = 0.7
+
+
+class SetConversationModelRequest(BaseModel):
+    model_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -111,7 +340,9 @@ class GenerateImageRequest(BaseModel):
     guidance_scale: float = 7.5
     width: int = 1024
     height: int = 1024
+    aspect_ratio: Optional[str] = None  # z.B. "16:9", "custom:2.5:1"
     model_id: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class GenerateImageResponse(BaseModel):
@@ -119,14 +350,24 @@ class GenerateImageResponse(BaseModel):
     model_id: str
 
 
-class GenerateImageRequest(BaseModel):
-    prompt: str
-    negative_prompt: str = ""
-    num_inference_steps: int = 20
-    guidance_scale: float = 7.5
-    width: int = 1024
-    height: int = 1024
-    model_id: Optional[str] = None
+class PerformanceSettingsRequest(BaseModel):
+    cpu_threads: Optional[int] = None
+    gpu_optimization: str = "balanced"  # balanced, speed, memory
+    disable_cpu_offload: bool = False
+
+
+class PerformanceSettingsResponse(BaseModel):
+    cpu_threads: Optional[int]
+    gpu_optimization: str
+    disable_cpu_offload: bool
+
+
+class AudioSettingsRequest(BaseModel):
+    transcription_language: Optional[str] = ""  # Leerer String = Auto-Erkennung
+
+
+class AudioSettingsResponse(BaseModel):
+    transcription_language: Optional[str]
 
 
 class GenerateImageResponse(BaseModel):
@@ -203,13 +444,351 @@ async def get_models():
     }
 
 
+def _load_text_model_async(model_id: str, conversation_id: Optional[str] = None):
+    """Lädt ein Text-Modell im Hintergrund"""
+    try:
+        loading_status["text_model"]["loading"] = True
+        loading_status["text_model"]["model_id"] = model_id
+        loading_status["text_model"]["error"] = None
+        loading_status["text_model"]["conversation_id"] = conversation_id
+        
+        success = model_manager.load_model(model_id)
+        if not success:
+            loading_status["text_model"]["error"] = f"Fehler beim Laden des Modells: {model_id}"
+        else:
+            loading_status["text_model"]["error"] = None
+    except Exception as e:
+        loading_status["text_model"]["error"] = str(e)
+        logger.error(f"Fehler beim asynchronen Laden des Modells: {e}")
+    finally:
+        loading_status["text_model"]["loading"] = False
+        loading_status["text_model"]["conversation_id"] = None
+
 @app.post("/models/load")
 async def load_model(request: LoadModelRequest):
-    """Lädt ein Modell"""
-    success = model_manager.load_model(request.model_id)
-    if not success:
-        raise HTTPException(status_code=400, detail=f"Fehler beim Laden des Modells: {request.model_id}")
-    return {"message": f"Modell geladen: {request.model_id}", "model_id": request.model_id}
+    """Lädt ein Modell im Hintergrund (blockiert UI nicht)"""
+    # Prüfe ob bereits ein Modell geladen wird
+    if loading_status["text_model"]["loading"]:
+        raise HTTPException(status_code=400, detail="Ein Modell wird bereits geladen. Bitte warten Sie.")
+    
+    # Starte Ladevorgang im Hintergrund
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(model_load_executor, _load_text_model_async, request.model_id, None)
+    
+    return {
+        "message": f"Modell wird geladen: {request.model_id}",
+        "model_id": request.model_id,
+        "status": "loading"
+    }
+
+@app.get("/models/load/status")
+async def get_model_load_status():
+    """Gibt den Status des Modell-Ladevorgangs zurück"""
+    
+    return loading_status["text_model"]
+
+
+async def ensure_image_model_loaded(model_id: str, conversation_id: Optional[str] = None) -> bool:
+    """
+    Stellt sicher dass ein Image-Modell geladen ist.
+    Lädt es asynchron falls nötig.
+    
+    Returns:
+        True wenn Modell bereits geladen oder sofort geladen werden konnte
+        False wenn Modell im Hintergrund geladen wird
+    """
+    if not image_manager:
+        raise HTTPException(status_code=503, detail="Bildgenerierung nicht verfügbar")
+    
+    # Prüfe dynamisch ob Model-Service verfügbar ist (kann sich zur Laufzeit ändern)
+    use_model_service = check_model_service_available()
+    
+    
+    
+    # Prüfe ob Modell bereits geladen ist (abhängig von Model-Service-Verfügbarkeit)
+    if use_model_service:
+        # Prüfe Model-Service Status
+        status = model_service_client.get_image_model_status()
+        
+        if status and status.get("loaded") and status.get("model_id") == model_id:
+            
+            return True  # Bereits im Model Service geladen
+    else:
+        # Prüfe lokalen Manager
+        current_model = image_manager.get_current_model()
+        if current_model == model_id and image_manager.is_model_loaded():
+            
+            return True  # Bereits geladen
+    
+    # Prüfe ob bereits ein Modell geladen wird
+    if loading_status["image_model"]["loading"]:
+        # Prüfe ob es das gleiche Modell ist
+        if loading_status["image_model"]["model_id"] == model_id:
+            
+            return False  # Wird bereits geladen
+        else:
+            # Anderes Modell wird geladen - prüfe ob es hängt (länger als 10 Minuten)
+            import time
+            # Wenn loading länger als 10 Minuten dauert, könnte es hängen
+            # Aber wir starten trotzdem kein neues Laden, um Konflikte zu vermeiden
+            logger.warning(f"Ein anderes Modell ({loading_status['image_model']['model_id']}) wird bereits geladen. Warte auf Abschluss.")
+            return False  # Warte auf aktuelles Laden
+    
+    
+    
+    # Prüfe dynamisch ob Model-Service verfügbar ist
+    use_model_service = check_model_service_available()
+    
+    # Starte asynchrones Laden
+    if use_model_service:
+        # Nutze Model Service - lade direkt (nicht asynchron, da Model Service bereits asynchron lädt)
+        logger.info(f"Lade Bildmodell über Model Service: {model_id}")
+        success = model_service_client.load_image_model(model_id)
+        if success:
+            # Prüfe Status nach kurzer Wartezeit
+            import time
+            time.sleep(2)
+            status = model_service_client.get_image_model_status()
+            if status and status.get("loaded") and status.get("model_id") == model_id:
+                return True  # Bereits geladen
+            else:
+                return False  # Wird noch geladen
+        else:
+            return False  # Fehler beim Laden
+    else:
+        # Fallback: Nutze lokalen Manager asynchron
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(image_load_executor, _load_image_model_async, model_id, conversation_id)
+        return False  # Wird geladen
+
+async def ensure_text_model_loaded(model_id: str, conversation_id: Optional[str] = None) -> bool:
+    """
+    Stellt sicher dass ein Text-Modell geladen ist.
+    Lädt es asynchron falls nötig.
+    
+    Returns:
+        True wenn Modell bereits geladen oder sofort geladen werden konnte
+        False wenn Modell im Hintergrund geladen wird
+    """
+    
+    
+    # Prüfe ob Modell bereits geladen ist (abhängig von USE_MODEL_SERVICE)
+    if USE_MODEL_SERVICE:
+        # Prüfe Model-Service Status
+        status = model_service_client.get_text_model_status()
+        if status and status.get("loaded") and status.get("model_id") == model_id:
+            return True  # Bereits im Model Service geladen
+    else:
+        # Prüfe lokalen Manager
+        if model_manager.get_current_model() == model_id:
+            return True  # Bereits geladen
+    
+    # Prüfe ob bereits ein Modell geladen wird
+    if loading_status["text_model"]["loading"]:
+        # Prüfe ob es das gleiche Modell ist
+        if loading_status["text_model"]["model_id"] == model_id:
+            return False  # Wird bereits geladen
+        else:
+            # Anderes Modell wird geladen - warte nicht, starte neues Laden
+            pass
+    
+    
+    # Starte asynchrones Laden
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(model_load_executor, _load_text_model_async, model_id, conversation_id)
+    
+    return False  # Wird geladen
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """
+    Chat-Endpunkt mit Streaming - gibt Antworten schrittweise zurück
+    """
+    
+    # Conversation ID prüfen/erstellen
+    conversation_id = request.conversation_id
+    if not conversation_id:
+        conversation_id = conversation_manager.create_conversation(conversation_type="chat")
+    
+    # Prüfe ob Conversation ein Modell zugewiesen hat
+    conversation_model_id = conversation_manager.get_conversation_model(conversation_id)
+    
+    # Bestimme welches Modell verwendet werden soll
+    model_to_use = conversation_model_id
+    
+    if not model_to_use:
+        
+        if USE_MODEL_SERVICE:
+            status = model_service_client.get_text_model_status()
+            
+            if status and status.get("loaded"):
+                model_to_use = status.get("model_id")
+            else:
+                default_model = model_manager.config.get("default_model")
+                if default_model:
+                    model_to_use = default_model
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Modell geladen")
+        else:
+            
+            if model_manager.is_model_loaded():
+                model_to_use = model_manager.get_current_model()
+            else:
+                default_model = model_manager.config.get("default_model")
+                if default_model:
+                    model_to_use = default_model
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Modell geladen")
+    
+    # Lade Conversation History
+    history = conversation_manager.get_conversation_history(conversation_id)
+    
+    # Erstelle Messages-Liste
+    messages = []
+    current_model = model_manager.get_current_model() if not USE_MODEL_SERVICE else model_to_use
+    if current_model and "phi-3" in current_model.lower():
+        system_prompt = "Du bist ein hilfreicher AI-Assistent."
+    else:
+        system_prompt = None
+    
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    
+    # Filtere History: Nur user/assistant Rollen, keine agent_* Rollen
+    # Entferne auch die aktuelle User-Nachricht falls sie bereits in der History ist
+    filtered_history = []
+    for msg in history[-10:]:  # Letzte 10 Nachrichten
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        
+        # Überspringe die aktuelle User-Nachricht falls sie bereits in der History ist
+        if role == "user" and content == request.message:
+            continue
+        
+        # Konvertiere agent_* Rollen zu user
+        if role.startswith("agent_"):
+            role = "user"
+        # Nur user/assistant Rollen erlauben
+        if role in ["user", "assistant"]:
+            filtered_history.append({"role": role, "content": content})
+    
+    # Stelle sicher, dass Rollen alternieren (keine zwei aufeinanderfolgenden gleichen Rollen)
+    cleaned_history = []
+    last_role = None
+    for msg in filtered_history:
+        current_role = msg.get("role")
+        # Überspringe wenn die Rolle gleich der vorherigen ist
+        if current_role == last_role:
+            continue
+        cleaned_history.append(msg)
+        last_role = current_role
+    
+    # Stelle sicher, dass nach System-Prompt die erste Nachricht "user" ist
+    # Wenn die History mit "assistant" beginnt, entferne sie
+    if cleaned_history and cleaned_history[0].get("role") == "assistant":
+        cleaned_history = cleaned_history[1:]  # Entferne erste "assistant" Nachricht
+    
+    # Füge gefilterte History hinzu
+    messages.extend(cleaned_history)
+    
+    # Aktuelle Nachricht hinzufügen - nur wenn die letzte Nachricht nicht bereits "user" ist
+    if not cleaned_history or cleaned_history[-1].get("role") != "user":
+        messages.append({"role": "user", "content": request.message})
+    else:
+        # Wenn die letzte History-Nachricht bereits "user" ist, ersetze sie mit der aktuellen
+        if messages and messages[-1].get("role") == "user":
+            messages[-1] = {"role": "user", "content": request.message}
+        else:
+            messages.append({"role": "user", "content": request.message})
+    
+    # Speichere User-Nachricht
+    conversation_manager.add_message(conversation_id, "user", request.message)
+    
+    # Streaming-Generator
+    async def generate():
+        try:
+            
+            effective_temperature = request.temperature if request.temperature > 0 else 0.3
+            
+            full_response = ""
+            
+            if USE_MODEL_SERVICE:
+                # Model-Service unterstützt noch kein echtes Streaming
+                # Verwende lokales Streaming als Fallback, wenn Modell lokal verfügbar ist
+                try:
+                    # Versuche lokales Streaming zu verwenden, wenn Modell lokal geladen ist
+                    if model_manager.is_model_loaded():
+                        # Lokales Streaming verwenden
+                        for chunk in model_manager.generate_stream(
+                            messages,
+                            max_length=request.max_length,
+                            temperature=effective_temperature
+                        ):
+                            full_response += chunk
+                            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                        yield f"data: {json.dumps({'done': True})}\n\n"
+                    else:
+                        # Fallback: Normale Methode und simuliere Streaming
+                        result = model_service_client.chat(
+                            message=request.message,
+                            messages=messages,
+                            conversation_id=conversation_id,
+                            max_length=request.max_length,
+                            temperature=effective_temperature
+                        )
+                        if result:
+                            response = result.get("response", "")
+                            full_response = response
+                            # Simuliere Streaming durch Chunks (kleinere Chunks für bessere UX)
+                            chunk_size = 10
+                            for i in range(0, len(response), chunk_size):
+                                chunk = response[i:i+chunk_size]
+                                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                                # Kleine Verzögerung für bessere UX
+                                await asyncio.sleep(0.01)
+                            yield f"data: {json.dumps({'done': True})}\n\n"
+                except Exception as e:
+                    logger.error(f"Fehler bei Streaming mit Model-Service: {e}")
+                    # Fallback auf normale Methode
+                    result = model_service_client.chat(
+                        message=request.message,
+                        messages=messages,
+                        conversation_id=conversation_id,
+                        max_length=request.max_length,
+                        temperature=effective_temperature
+                    )
+                    if result:
+                        response = result.get("response", "")
+                        full_response = response
+                        # Simuliere Streaming durch Chunks
+                        chunk_size = 10
+                        for i in range(0, len(response), chunk_size):
+                            chunk = response[i:i+chunk_size]
+                            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                            await asyncio.sleep(0.01)
+                        yield f"data: {json.dumps({'done': True})}\n\n"
+            else:
+                
+                # Lokales Streaming
+                for chunk in model_manager.generate_stream(
+                    messages,
+                    max_length=request.max_length,
+                    temperature=effective_temperature
+                ):
+                    full_response += chunk
+                    yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            
+            # Speichere vollständige Antwort
+            if full_response:
+                conversation_manager.add_message(conversation_id, "assistant", full_response)
+        except Exception as e:
+            
+            logger.error(f"Fehler bei Streaming: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -217,20 +796,142 @@ async def chat(request: ChatRequest):
     """
     Chat-Endpunkt - verarbeitet eine Nachricht und gibt eine Antwort zurück
     """
-    # Prüfe ob Modell geladen ist
-    if not model_manager.is_model_loaded():
-        # Lade Default-Modell
-        default_model = model_manager.config.get("default_model")
-        if default_model:
-            logger.info(f"Lade Default-Modell: {default_model}")
-            model_manager.load_model(default_model)
-        else:
-            raise HTTPException(status_code=400, detail="Kein Modell geladen und kein Default-Modell konfiguriert")
     
     # Conversation ID prüfen/erstellen
     conversation_id = request.conversation_id
     if not conversation_id:
-        conversation_id = conversation_manager.create_conversation()
+        conversation_id = conversation_manager.create_conversation(conversation_type="chat")
+    
+    # Prüfe ob Conversation ein Modell zugewiesen hat
+    conversation_model_id = conversation_manager.get_conversation_model(conversation_id)
+    
+    # Bestimme welches Modell verwendet werden soll
+    model_to_use = conversation_model_id  # Conversation-Modell hat Priorität
+    
+    # Wenn kein Conversation-Modell, prüfe ob globales Modell geladen ist
+    if not model_to_use:
+        if USE_MODEL_SERVICE:
+            # Prüfe Model-Service Status
+            status = model_service_client.get_text_model_status()
+            if status and status.get("loaded"):
+                model_to_use = status.get("model_id")
+            else:
+                # Lade Default-Modell
+                default_model = model_manager.config.get("default_model")
+                if default_model:
+                    model_to_use = default_model
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Modell geladen und kein Default-Modell konfiguriert")
+        else:
+            # Fallback auf lokale Manager
+            if model_manager.is_model_loaded():
+                model_to_use = model_manager.get_current_model()
+            else:
+                # Lade Default-Modell
+                default_model = model_manager.config.get("default_model")
+                if default_model:
+                    model_to_use = default_model
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Modell geladen und kein Default-Modell konfiguriert")
+    
+    
+    
+    # Stelle sicher dass Modell geladen ist
+    if USE_MODEL_SERVICE:
+        # Nutze Model-Service
+        status = model_service_client.get_text_model_status()
+        if status and status.get("loaded") and status.get("model_id") == model_to_use:
+            # Modell ist bereits geladen
+            model_ready = True
+        else:
+            # Prüfe ob Modell bereits geladen wird (im Model Service)
+            # Der Model Service prüft intern, ob das Modell bereits geladen ist
+            # Modell muss geladen werden
+            if not model_service_client.load_text_model(model_to_use):
+                raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Modells: {model_to_use}")
+            model_ready = True
+    else:
+        # Fallback: Nutze lokale Manager
+        model_ready = await ensure_text_model_loaded(model_to_use, conversation_id)
+    
+    # Wenn Modell noch nicht geladen ist, gib Status zurück
+    if not model_ready:
+        raise HTTPException(
+            status_code=202,  # Accepted - wird verarbeitet
+            detail={
+                "status": "model_loading",
+                "message": f"Modell {model_to_use} wird geladen. Bitte warten Sie.",
+                "model_id": model_to_use,
+                "conversation_id": conversation_id
+            }
+        )
+    
+    # Prüfe Agent-Modus
+    agent_mode_enabled = conversation_manager.get_agent_mode(conversation_id)
+    
+    # Wenn Agent-Modus aktiviert, nutze ChatAgent
+    if agent_mode_enabled:
+        try:
+            # Stelle sicher dass Modell geladen ist
+            if USE_MODEL_SERVICE:
+                status = model_service_client.get_text_model_status()
+                if not (status and status.get("loaded") and status.get("model_id") == model_to_use):
+                    if not model_service_client.load_text_model(model_to_use):
+                        raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Modells: {model_to_use}")
+            else:
+                model_ready = await ensure_text_model_loaded(model_to_use, conversation_id)
+                if not model_ready:
+                    raise HTTPException(
+                        status_code=202,
+                        detail={
+                            "status": "model_loading",
+                            "message": f"Modell {model_to_use} wird geladen. Bitte warten Sie.",
+                            "model_id": model_to_use,
+                            "conversation_id": conversation_id
+                        }
+                    )
+            
+            # Erstelle oder hole ChatAgent für diese Conversation
+            conversation_agents = agent_manager.get_conversation_agents(conversation_id)
+            chat_agent = None
+            
+            # Suche nach existierendem ChatAgent
+            for agent_info in conversation_agents:
+                if agent_info.get("type") == "chat_agent":
+                    chat_agent = agent_manager.get_agent(conversation_id, agent_info["id"])
+                    break
+            
+            # Erstelle neuen ChatAgent falls nicht vorhanden
+            if not chat_agent:
+                agent_id = agent_manager.create_agent(
+                    conversation_id=conversation_id,
+                    agent_type="chat_agent",
+                    model_id=model_to_use,
+                    set_managers_func=set_agent_managers
+                )
+                chat_agent = agent_manager.get_agent(conversation_id, agent_id)
+            
+            # Nutze ChatAgent für Antwort-Generierung
+            response = chat_agent.process_message(request.message)
+            
+            # Speichere Nachrichten
+            conversation_manager.add_message(conversation_id, "user", request.message)
+            conversation_manager.add_message(conversation_id, "assistant", response)
+            
+            # Lerne aus Conversation (wenn aktiviert)
+            if preference_learner.is_enabled():
+                all_messages = conversation_manager.get_conversation_history(conversation_id)
+                preference_learner.learn_from_conversation(all_messages)
+            
+            return ChatResponse(response=response, conversation_id=conversation_id)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Fehler bei Agent-Modus: {e}")
+            # Fallback auf normalen Chat-Modus bei Fehler
+            logger.warning("Fallback auf normalen Chat-Modus")
+            agent_mode_enabled = False
     
     # Lade Conversation History
     history = conversation_manager.get_conversation_history(conversation_id)
@@ -254,24 +955,90 @@ async def chat(request: ChatRequest):
         messages.append({"role": "system", "content": system_prompt})
     
     # Conversation History hinzufügen
-    messages.extend(history)
     
-    # Aktuelle Nachricht hinzufügen
-    messages.append({"role": "user", "content": request.message})
+    
+    # Filtere History: Nur user/assistant Rollen, keine agent_* Rollen
+    # Entferne auch die aktuelle User-Nachricht falls sie bereits in der History ist
+    filtered_history = []
+    for msg in history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        
+        # Überspringe die aktuelle User-Nachricht falls sie bereits in der History ist
+        if role == "user" and content == request.message:
+            continue
+        
+        # Konvertiere agent_* Rollen zu user
+        if role.startswith("agent_"):
+            role = "user"
+        # Nur user/assistant Rollen erlauben
+        if role in ["user", "assistant"]:
+            filtered_history.append({"role": role, "content": content})
+    
+    # Stelle sicher, dass Rollen alternieren (keine zwei aufeinanderfolgenden gleichen Rollen)
+    cleaned_history = []
+    last_role = None
+    for msg in filtered_history:
+        current_role = msg.get("role")
+        # Überspringe wenn die Rolle gleich der vorherigen ist
+        if current_role == last_role:
+            continue
+        cleaned_history.append(msg)
+        last_role = current_role
+    
+    # Stelle sicher, dass nach System-Prompt die erste Nachricht "user" ist
+    # Wenn die History mit "assistant" beginnt, entferne sie
+    if cleaned_history and cleaned_history[0].get("role") == "assistant":
+        cleaned_history = cleaned_history[1:]  # Entferne erste "assistant" Nachricht
+    
+    filtered_history = cleaned_history
+    
+    
+    
+    messages.extend(filtered_history)
+    
+    # Aktuelle Nachricht hinzufügen - nur wenn die letzte Nachricht nicht bereits "user" ist
+    # (um sicherzustellen, dass Rollen alternieren)
+    if not filtered_history or filtered_history[-1].get("role") != "user":
+        messages.append({"role": "user", "content": request.message})
+    else:
+        # Wenn die letzte History-Nachricht bereits "user" ist, ersetze die letzte Message
+        # (die bereits in messages ist, da wir filtered_history hinzugefügt haben)
+        if messages and len(messages) > 0 and messages[-1].get("role") == "user":
+            messages[-1] = {"role": "user", "content": request.message}
+        else:
+            messages.append({"role": "user", "content": request.message})
+    
+    
     
     # Logge Messages (Memory 4468610)
     logger.info(f"Messages: {len(messages)} Nachrichten")
     
-    # Generiere Antwort mit verbesserter Methode
+    # Generiere Antwort
     try:
         # Verwende niedrigere Temperature standardmäßig für bessere Qualität
         effective_temperature = request.temperature if request.temperature > 0 else 0.3
         
-        response = model_manager.generate(
-            messages,
-            max_length=request.max_length,
-            temperature=effective_temperature
-        )
+        if USE_MODEL_SERVICE:
+            # Nutze Model-Service
+            result = model_service_client.chat(
+                message=request.message,
+                messages=messages,  # Sende vollständige Messages-Liste
+                conversation_id=conversation_id,
+                max_length=request.max_length,
+                temperature=effective_temperature
+            )
+            if result:
+                response = result.get("response", "")
+            else:
+                raise HTTPException(status_code=500, detail="Fehler bei Chat-Request an Model-Service")
+        else:
+            # Fallback: Nutze lokale Manager
+            response = model_manager.generate(
+                messages,
+                max_length=request.max_length,
+                temperature=effective_temperature
+            )
         
         # Logge Response
         logger.info(f"Response: {response[:200]}...")
@@ -379,9 +1146,48 @@ async def get_conversation(conversation_id: str):
 
 @app.post("/conversations")
 async def create_conversation():
-    """Erstellt eine neue Conversation"""
-    conversation_id = conversation_manager.create_conversation()
+    """Erstellt eine neue Chat-Conversation"""
+    conversation_id = conversation_manager.create_conversation(conversation_type="chat")
     return {"conversation_id": conversation_id}
+
+@app.post("/conversations/image")
+async def create_image_conversation():
+    """Erstellt eine neue Image-Conversation"""
+    conversation_id = conversation_manager.create_conversation(conversation_type="image")
+    return {"conversation_id": conversation_id}
+
+
+@app.get("/conversations/{conversation_id}/agent-mode")
+async def get_agent_mode(conversation_id: str):
+    """Gibt den Agent-Modus-Status einer Conversation zurück"""
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    agent_mode = conversation_manager.get_agent_mode(conversation_id)
+    return {"conversation_id": conversation_id, "agent_mode": agent_mode}
+
+
+class SetAgentModeRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/conversations/{conversation_id}/agent-mode")
+async def set_agent_mode(conversation_id: str, request: SetAgentModeRequest):
+    """Aktiviert oder deaktiviert den Agent-Modus für eine Conversation"""
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    success = conversation_manager.set_agent_mode(conversation_id, request.enabled)
+    if not success:
+        raise HTTPException(status_code=500, detail="Fehler beim Setzen des Agent-Modus")
+    
+    return {
+        "conversation_id": conversation_id,
+        "agent_mode": request.enabled,
+        "message": f"Agent-Modus {'aktiviert' if request.enabled else 'deaktiviert'}"
+    }
 
 
 @app.delete("/conversations/{conversation_id}")
@@ -392,6 +1198,233 @@ async def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
     return {"message": "Conversation gelöscht"}
 
+
+@app.post("/conversations/{conversation_id}/model")
+async def set_conversation_model(conversation_id: str, request: SetConversationModelRequest):
+    """Setzt das Modell für eine Conversation"""
+    # Prüfe ob Conversation existiert
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    # Prüfe ob Modell existiert (wenn angegeben)
+    if request.model_id:
+        available_models = model_manager.get_available_models()
+        if request.model_id not in available_models:
+            raise HTTPException(status_code=400, detail=f"Modell nicht gefunden: {request.model_id}")
+    
+    # Setze Modell
+    success = conversation_manager.set_conversation_model(conversation_id, request.model_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Fehler beim Setzen des Modells")
+    
+    return {"message": f"Modell für Conversation gesetzt: {request.model_id or 'Kein Modell'}", "model_id": request.model_id}
+
+
+# Agent API Endpoints
+
+class CreateAgentRequest(BaseModel):
+    agent_type: str
+    model_id: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+
+
+class AgentChatRequest(BaseModel):
+    message: str
+
+
+class CreatePipelineRequest(BaseModel):
+    name: str
+    steps: List[Dict[str, Any]]
+    initial_input: str
+
+
+@app.get("/agents/types")
+async def get_agent_types():
+    """Gibt alle verfügbaren Agent-Typen zurück"""
+    return {"agent_types": agent_manager.get_available_agent_types()}
+
+
+@app.get("/agents")
+async def get_agents(conversation_id: Optional[str] = None):
+    """Gibt Agenten zurück (optional gefiltert nach Conversation)"""
+    if conversation_id:
+        agents = agent_manager.get_conversation_agents(conversation_id)
+        return {"agents": agents, "conversation_id": conversation_id}
+    else:
+        # Gibt alle Agenten aller Conversations zurück
+        all_agents = []
+        for conv_id in agent_manager.agent_instances.keys():
+            agents = agent_manager.get_conversation_agents(conv_id)
+            for agent in agents:
+                agent["conversation_id"] = conv_id
+            all_agents.extend(agents)
+        return {"agents": all_agents}
+
+
+@app.post("/agents/create")
+async def create_agent(conversation_id: str, request: CreateAgentRequest):
+    """Erstellt einen neuen Agent für eine Conversation"""
+    # Prüfe ob Conversation existiert
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    try:
+        agent_id = agent_manager.create_agent(
+            conversation_id=conversation_id,
+            agent_type=request.agent_type,
+            model_id=request.model_id,
+            config=request.config,
+            set_managers_func=set_agent_managers
+        )
+        
+        agent = agent_manager.get_agent(conversation_id, agent_id)
+        return {
+            "agent_id": agent_id,
+            "conversation_id": conversation_id,
+            "agent_info": agent.get_info() if agent else None
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Fehler beim Erstellen des Agenten: {e}")
+        raise HTTPException(status_code=500, detail=f"Fehler beim Erstellen des Agenten: {str(e)}")
+
+
+@app.get("/agents/{conversation_id}/{agent_id}")
+async def get_agent(conversation_id: str, agent_id: str):
+    """Gibt einen Agent zurück"""
+    agent = agent_manager.get_agent(conversation_id, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent nicht gefunden")
+    return {"agent": agent.get_info()}
+
+
+@app.post("/agents/{conversation_id}/{agent_id}/chat")
+async def agent_chat(conversation_id: str, agent_id: str, request: AgentChatRequest):
+    """Chat mit einem Agent"""
+    agent = agent_manager.get_agent(conversation_id, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent nicht gefunden")
+    
+    try:
+        response = agent.process_message(request.message)
+        return {"response": response, "agent_id": agent_id}
+    except Exception as e:
+        logger.error(f"Fehler beim Agent-Chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Fehler beim Agent-Chat: {str(e)}")
+
+
+@app.delete("/agents/{conversation_id}/{agent_id}")
+async def delete_agent(conversation_id: str, agent_id: str):
+    """Löscht einen Agent"""
+    success = agent_manager.delete_agent(conversation_id, agent_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Agent nicht gefunden")
+    return {"message": "Agent gelöscht"}
+
+
+@app.post("/restart")
+async def restart_server():
+    """Startet den Server neu (ruft start_local_ai.bat auf)"""
+    try:
+        import subprocess
+        import sys
+        
+        # Pfad zum start_local_ai.bat
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        restart_script = os.path.join(project_root, "start_local_ai.bat")
+        
+        if not os.path.exists(restart_script):
+            raise HTTPException(status_code=404, detail="Restart-Script nicht gefunden")
+        
+        # Starte Restart-Script in neuem Prozess (nicht-blockierend)
+        # Auf Windows: start ohne Warten
+        if sys.platform == "win32":
+            subprocess.Popen(
+                [restart_script],
+                cwd=project_root,
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+        else:
+            # Linux/Mac
+            subprocess.Popen(
+                ["bash", restart_script],
+                cwd=project_root,
+                start_new_session=True
+            )
+        
+        logger.info("Server-Restart initiiert")
+        return {
+            "status": "success",
+            "message": "Server wird neu gestartet..."
+        }
+    except Exception as e:
+        logger.error(f"Fehler beim Server-Restart: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/agents/tools")
+async def get_tools():
+    """Gibt alle verfügbaren Tools zurück"""
+    return {"tools": agent_manager.get_available_tools()}
+
+
+@app.post("/agents/pipeline")
+async def create_and_execute_pipeline(conversation_id: str, request: CreatePipelineRequest):
+    """Erstellt und führt eine Pipeline aus"""
+    # Prüfe ob Conversation existiert
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    try:
+        # Erstelle Pipeline
+        pipeline_id = pipeline_manager.create_pipeline(
+            conversation_id=conversation_id,
+            pipeline_name=request.name,
+            steps=request.steps
+        )
+        
+        # Führe Pipeline aus
+        result = pipeline_manager.execute_pipeline(pipeline_id, request.initial_input)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Fehler bei Pipeline-Ausführung: {e}")
+        raise HTTPException(status_code=500, detail=f"Fehler bei Pipeline-Ausführung: {str(e)}")
+
+
+@app.get("/agents/pipeline/{pipeline_id}")
+async def get_pipeline(pipeline_id: str):
+    """Gibt eine Pipeline zurück"""
+    pipeline = pipeline_manager.get_pipeline(pipeline_id)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline nicht gefunden")
+    return {"pipeline": pipeline}
+
+
+@app.get("/agents/pipelines/{conversation_id}")
+async def get_conversation_pipelines(conversation_id: str):
+    """Gibt alle Pipelines einer Conversation zurück"""
+    pipelines = pipeline_manager.get_conversation_pipelines(conversation_id)
+    return {"pipelines": pipelines}
+
+
+@app.get("/config")
+async def get_config():
+    """Gibt die Konfiguration zurück (für Frontend)"""
+    return {
+        "image_generation": config.get("image_generation", {
+            "resolution_presets": {
+                "s": 512,
+                "m": 720,
+                "l": 1024
+            }
+        })
+    }
 
 @app.get("/preferences")
 async def get_preferences():
@@ -414,6 +1447,104 @@ async def reset_preferences():
     return {"message": "Präferenzen zurückgesetzt"}
 
 
+# Performance-Einstellungen
+PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
+AUDIO_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "audio_settings.json")
+
+def _load_performance_settings() -> Dict[str, Any]:
+    """Lädt Performance-Einstellungen"""
+    try:
+        if os.path.exists(PERFORMANCE_SETTINGS_FILE):
+            with open(PERFORMANCE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der Performance-Einstellungen: {e}")
+    return {
+        "cpu_threads": None,  # None = Auto
+        "gpu_optimization": "balanced",
+        "disable_cpu_offload": False
+    }
+
+def _save_performance_settings(settings: Dict[str, Any]):
+    """Speichert Performance-Einstellungen"""
+    try:
+        os.makedirs(os.path.dirname(PERFORMANCE_SETTINGS_FILE), exist_ok=True)
+        with open(PERFORMANCE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern der Performance-Einstellungen: {e}")
+
+@app.get("/performance/settings", response_model=PerformanceSettingsResponse)
+async def get_performance_settings():
+    """Gibt die aktuellen Performance-Einstellungen zurück"""
+    settings = _load_performance_settings()
+    return PerformanceSettingsResponse(**settings)
+
+@app.post("/performance/settings", response_model=PerformanceSettingsResponse)
+async def set_performance_settings(request: PerformanceSettingsRequest):
+    """Setzt Performance-Einstellungen"""
+    settings = {
+        "cpu_threads": request.cpu_threads,
+        "gpu_optimization": request.gpu_optimization,
+        "disable_cpu_offload": request.disable_cpu_offload
+    }
+    _save_performance_settings(settings)
+    
+    # Wende CPU-Threads sofort an
+    if request.cpu_threads and request.cpu_threads > 0:
+        torch.set_num_threads(request.cpu_threads)
+        torch.set_num_interop_threads(request.cpu_threads)
+        logger.info(f"CPU-Threads auf {request.cpu_threads} gesetzt")
+    else:
+        # Auto - verwende alle verfügbaren Threads
+        import os as os_module
+        num_threads = os_module.cpu_count() or 4
+        torch.set_num_threads(num_threads)
+        torch.set_num_interop_threads(num_threads)
+        logger.info(f"CPU-Threads auf Auto ({num_threads}) gesetzt")
+    
+    logger.info(f"Performance-Einstellungen gespeichert: {settings}")
+    return PerformanceSettingsResponse(**settings)
+
+
+def _load_audio_settings() -> Dict[str, Any]:
+    """Lädt Audio-Einstellungen"""
+    try:
+        if os.path.exists(AUDIO_SETTINGS_FILE):
+            with open(AUDIO_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der Audio-Einstellungen: {e}")
+    return {
+        "transcription_language": ""  # Leerer String = Auto-Erkennung
+    }
+
+def _save_audio_settings(settings: Dict[str, Any]):
+    """Speichert Audio-Einstellungen"""
+    try:
+        os.makedirs(os.path.dirname(AUDIO_SETTINGS_FILE), exist_ok=True)
+        with open(AUDIO_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern der Audio-Einstellungen: {e}")
+
+@app.get("/audio/settings", response_model=AudioSettingsResponse)
+async def get_audio_settings():
+    """Gibt die aktuellen Audio-Einstellungen zurück"""
+    settings = _load_audio_settings()
+    return AudioSettingsResponse(**settings)
+
+@app.post("/audio/settings", response_model=AudioSettingsResponse)
+async def set_audio_settings(request: AudioSettingsRequest):
+    """Setzt Audio-Einstellungen"""
+    settings = {
+        "transcription_language": request.transcription_language or ""
+    }
+    _save_audio_settings(settings)
+    logger.info(f"Audio-Einstellungen gespeichert: {settings}")
+    return AudioSettingsResponse(**settings)
+
+
 @app.get("/image/models")
 async def get_image_models():
     """Gibt alle verfügbaren Bildgenerierungsmodelle zurück"""
@@ -423,13 +1554,127 @@ async def get_image_models():
     }
 
 
+def _load_image_model_async(model_id: str, conversation_id: Optional[str] = None):
+    """Lädt ein Bild-Modell im Hintergrund"""
+    import time
+    import threading
+    import os
+    import json
+    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
+    
+    
+    
+    start_time = time.time()
+    max_load_time = 600  # 10 Minuten Maximum für Modell-Laden
+    
+    try:
+        loading_status["image_model"]["loading"] = True
+        loading_status["image_model"]["model_id"] = model_id
+        loading_status["image_model"]["error"] = None
+        loading_status["image_model"]["conversation_id"] = conversation_id
+        loading_status["image_model"]["start_time"] = start_time
+        
+        logger.info(f"Starte Laden des Bildmodells {model_id} (max. {max_load_time}s)...")
+        
+        # Prüfe dynamisch ob Model-Service verfügbar ist
+        use_model_service = check_model_service_available()
+        
+        
+        
+        # Lade Modell - verwende Model Service wenn verfügbar, sonst lokalen Manager
+        if use_model_service:
+            # Nutze Model Service
+            logger.info(f"Lade Bildmodell über Model Service: {model_id}")
+            success = model_service_client.load_image_model(model_id)
+            if success:
+                # Warte kurz und prüfe Status
+                time.sleep(1)
+                status = model_service_client.get_image_model_status()
+                if status and status.get("loaded") and status.get("model_id") == model_id:
+                    logger.info(f"Bildmodell erfolgreich über Model Service geladen: {model_id}")
+                else:
+                    logger.warning(f"Model Service meldet Modell als geladen, aber Status-Prüfung fehlgeschlagen")
+        else:
+            # Fallback: Nutze lokalen Manager
+            if not image_manager:
+                logger.error("ImageManager nicht verfügbar und Model Service nicht verfügbar")
+                success = False
+            else:
+                logger.info(f"Lade Bildmodell lokal: {model_id}")
+                success = image_manager.load_model(model_id)
+        
+        
+        
+        elapsed_time = time.time() - start_time
+        if not success:
+            loading_status["image_model"]["error"] = f"Fehler beim Laden des Bildgenerierungsmodells: {model_id}"
+            logger.error(f"Modell-Laden fehlgeschlagen nach {elapsed_time:.1f}s: {model_id}")
+        else:
+            loading_status["image_model"]["error"] = None
+            logger.info(f"Modell erfolgreich geladen nach {elapsed_time:.1f}s: {model_id}")
+            
+    except KeyboardInterrupt:
+        # Wird bei Unterbrechung aufgerufen
+        loading_status["image_model"]["error"] = "Modell-Laden wurde unterbrochen"
+        logger.warning(f"Modell-Laden wurde unterbrochen: {model_id}")
+    except Exception as e:
+        import traceback
+        elapsed_time = time.time() - start_time
+        error_msg = str(e)
+        loading_status["image_model"]["error"] = f"Fehler beim Laden: {error_msg}"
+        logger.error(f"Fehler beim asynchronen Laden des Bildmodells nach {elapsed_time:.1f}s: {e}", exc_info=True)
+        
+        
+    finally:
+        
+        
+        # Stelle sicher dass loading-Status immer zurückgesetzt wird
+        loading_status["image_model"]["loading"] = False
+        loading_status["image_model"]["conversation_id"] = None
+        loading_status["image_model"]["start_time"] = None
+        elapsed_time = time.time() - start_time
+        logger.info(f"Modell-Ladevorgang beendet nach {elapsed_time:.1f}s: {model_id}")
+        
+        
+
 @app.post("/image/models/load")
 async def load_image_model(request: LoadModelRequest):
-    """Lädt ein Bildgenerierungsmodell"""
-    success = image_manager.load_model(request.model_id)
-    if not success:
-        raise HTTPException(status_code=400, detail=f"Fehler beim Laden des Bildgenerierungsmodells: {request.model_id}")
-    return {"message": f"Bildgenerierungsmodell geladen: {request.model_id}", "model_id": request.model_id}
+    """Lädt ein Bildgenerierungsmodell im Hintergrund (blockiert UI nicht)"""
+    if not image_manager:
+        raise HTTPException(status_code=503, detail="Bildgenerierung nicht verfügbar (diffusers/xformers nicht installiert)")
+    
+    # Prüfe ob bereits ein Modell geladen wird
+    if loading_status["image_model"]["loading"]:
+        raise HTTPException(status_code=400, detail="Ein Bildmodell wird bereits geladen. Bitte warten Sie.")
+    
+    # Starte Ladevorgang im Hintergrund
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(image_load_executor, _load_image_model_async, request.model_id, None)
+    
+    return {
+        "message": f"Bildgenerierungsmodell wird geladen: {request.model_id}",
+        "model_id": request.model_id,
+        "status": "loading"
+    }
+
+@app.get("/image/models/load/status")
+async def get_image_model_load_status():
+    """Gibt den Status des Bildmodell-Ladevorgangs zurück"""
+    import time
+    
+    # Prüfe ob Loading länger als 10 Minuten dauert (möglicherweise hängt)
+    status = loading_status["image_model"].copy()
+    if status["loading"] and status.get("start_time"):
+        elapsed = time.time() - status["start_time"]
+        status["elapsed_seconds"] = elapsed
+        if elapsed > 600:  # 10 Minuten
+            logger.warning(f"Modell-Laden läuft bereits {elapsed:.1f}s - möglicherweise hängt es: {status['model_id']}")
+            status["warning"] = f"Laden läuft bereits {elapsed:.1f}s - möglicherweise hängt"
+    
+    
+    # Entferne start_time aus der Antwort (intern)
+    status.pop("start_time", None)
+    return status
 
 
 @app.post("/files/upload")
@@ -502,19 +1747,73 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/audio/models")
 async def get_audio_models():
     """Gibt alle verfügbaren Audio-Modelle zurück"""
-    return {
-        "models": whisper_manager.get_available_models(),
-        "current_model": whisper_manager.get_current_model()
-    }
+    if USE_MODEL_SERVICE:
+        # Hole Status vom Model-Service
+        status = model_service_client.get_audio_model_status()
+        current_model = status.get("model_id") if status else None
+        # Verfügbare Modelle kommen aus der Config (whisper_manager hat die Liste)
+        return {
+            "models": whisper_manager.get_available_models(),
+            "current_model": current_model
+        }
+    else:
+        # Lokale Manager
+        return {
+            "models": whisper_manager.get_available_models(),
+            "current_model": whisper_manager.get_current_model()
+        }
 
+
+def _load_audio_model_async(model_id: str):
+    """Lädt ein Audio-Modell im Hintergrund"""
+    try:
+        loading_status["audio_model"]["loading"] = True
+        loading_status["audio_model"]["model_id"] = model_id
+        loading_status["audio_model"]["error"] = None
+        
+        success = whisper_manager.load_model(model_id)
+        if not success:
+            loading_status["audio_model"]["error"] = f"Fehler beim Laden des Audio-Modells: {model_id}"
+        else:
+            loading_status["audio_model"]["error"] = None
+    except Exception as e:
+        loading_status["audio_model"]["error"] = str(e)
+        logger.error(f"Fehler beim asynchronen Laden des Audio-Modells: {e}")
+    finally:
+        loading_status["audio_model"]["loading"] = False
 
 @app.post("/audio/models/load")
 async def load_audio_model(request: LoadModelRequest):
-    """Lädt ein Audio-Modell"""
-    success = whisper_manager.load_model(request.model_id)
-    if not success:
-        raise HTTPException(status_code=400, detail=f"Fehler beim Laden des Audio-Modells: {request.model_id}")
-    return {"message": f"Audio-Modell geladen: {request.model_id}", "model_id": request.model_id}
+    """Lädt ein Audio-Modell im Hintergrund (blockiert UI nicht)"""
+    if USE_MODEL_SERVICE:
+        # Lade über Model-Service
+        if not model_service_client.load_audio_model(request.model_id):
+            raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Audio-Modells über Model-Service: {request.model_id}")
+        return {
+            "message": f"Audio-Modell wird geladen: {request.model_id}",
+            "model_id": request.model_id,
+            "status": "loading"
+        }
+    else:
+        # Lade lokal
+        # Prüfe ob bereits ein Modell geladen wird
+        if loading_status["audio_model"]["loading"]:
+            raise HTTPException(status_code=400, detail="Ein Audio-Modell wird bereits geladen. Bitte warten Sie.")
+        
+        # Starte Ladevorgang im Hintergrund
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(audio_load_executor, _load_audio_model_async, request.model_id)
+        
+        return {
+            "message": f"Audio-Modell wird geladen: {request.model_id}",
+            "model_id": request.model_id,
+            "status": "loading"
+        }
+
+@app.get("/audio/models/load/status")
+async def get_audio_model_load_status():
+    """Gibt den Status des Audio-Modell-Ladevorgangs zurück"""
+    return loading_status["audio_model"]
 
 
 class TranscribeAudioResponse(BaseModel):
@@ -527,16 +1826,74 @@ async def transcribe_audio(file: UploadFile = File(...), language: Optional[str]
     """
     Transkribiert Audio-Datei zu Text
     """
-    # Prüfe ob Modell geladen ist
-    if not whisper_manager.is_model_loaded():
+    
+    # Prüfe ob Modell geladen ist (abhängig von USE_MODEL_SERVICE)
+    model_loaded = False
+    if USE_MODEL_SERVICE:
+        # Prüfe Model-Service Status
+        status = model_service_client.get_audio_model_status()
+        model_loaded = status and status.get("loaded", False)
+    else:
+        # Prüfe lokalen Manager
+        model_loaded = whisper_manager.is_model_loaded()
+    
+    if not model_loaded:
+        
+        
+        # Prüfe ob bereits ein Modell geladen wird
+        if loading_status["audio_model"]["loading"]:
+            
+            raise HTTPException(
+                status_code=202,  # Accepted - wird verarbeitet
+                detail={
+                    "status": "model_loading",
+                    "message": f"Audio-Modell wird geladen. Bitte warten Sie.",
+                    "model_id": loading_status["audio_model"]["model_id"]
+                }
+            )
+        
         # Lade Default-Audio-Modell
-        available_models = whisper_manager.get_available_models()
-        if available_models:
-            default_model_id = list(available_models.keys())[0]
-            logger.info(f"Lade Default-Audio-Modell: {default_model_id}")
-            whisper_manager.load_model(default_model_id)
+        if USE_MODEL_SERVICE:
+            # Lade über Model-Service
+            # Hole verfügbare Modelle vom Model-Service oder aus Config
+            available_models = whisper_manager.get_available_models()  # Nur für Modell-Liste
+            if available_models:
+                default_model_id = list(available_models.keys())[0]
+                logger.info(f"Lade Audio-Modell über Model-Service: {default_model_id}")
+                # Lade über Model-Service
+                if not model_service_client.load_audio_model(default_model_id):
+                    raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Audio-Modells über Model-Service: {default_model_id}")
+                raise HTTPException(
+                    status_code=202,  # Accepted - wird verarbeitet
+                    detail={
+                        "status": "model_loading",
+                        "message": f"Audio-Modell {default_model_id} wird geladen. Bitte warten Sie.",
+                        "model_id": default_model_id
+                    }
+                )
+            else:
+                raise HTTPException(status_code=400, detail="Kein Audio-Modell verfügbar")
         else:
-            raise HTTPException(status_code=400, detail="Kein Audio-Modell geladen und kein Modell verfügbar")
+            # Lade lokal
+            available_models = whisper_manager.get_available_models()
+            if available_models:
+                default_model_id = list(available_models.keys())[0]
+                logger.info(f"Starte asynchrones Laden des Default-Audio-Modells: {default_model_id}")
+                
+                # Starte asynchrones Laden
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(audio_load_executor, _load_audio_model_async, default_model_id)
+                
+                raise HTTPException(
+                    status_code=202,  # Accepted - wird verarbeitet
+                    detail={
+                        "status": "model_loading",
+                        "message": f"Audio-Modell {default_model_id} wird geladen. Bitte warten Sie.",
+                        "model_id": default_model_id
+                    }
+                )
+            else:
+                raise HTTPException(status_code=400, detail="Kein Audio-Modell geladen und kein Modell verfügbar")
     
     try:
         # Lese Audio-Datei
@@ -544,13 +1901,18 @@ async def transcribe_audio(file: UploadFile = File(...), language: Optional[str]
         
         # Speichere temporär als WAV
         import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+        temp_dir = get_temp_directory()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav', dir=temp_dir) as tmp_file:
             tmp_file.write(content)
             tmp_path = tmp_file.name
         
         try:
-            # Lade Audio-Datei
+            # Lade Audio-Datei (wavfile.read schließt die Datei automatisch)
             sample_rate, audio_data = wavfile.read(tmp_path)
+            
+            # Warte kurz, damit Datei sicher geschlossen ist (Windows-spezifisch)
+            import time
+            time.sleep(0.1)
             
             # Konvertiere zu float32 und normalisiere
             if audio_data.dtype == np.int16:
@@ -581,19 +1943,55 @@ async def transcribe_audio(file: UploadFile = File(...), language: Optional[str]
                 audio_data = signal.resample(audio_data, int(len(audio_data) * 16000 / sample_rate))
             
             # Transkribiere
-            text = whisper_manager.transcribe(audio_data, language=language)
+            if USE_MODEL_SERVICE:
+                # Nutze Model-Service
+                import base64
+                # Konvertiere Audio zu WAV und dann zu Base64
+                from scipy.io import wavfile as wavfile_write
+                import tempfile as tmpfile
+                tmp_wav_path = None
+                try:
+                    temp_dir = get_temp_directory()
+                    with tmpfile.NamedTemporaryFile(delete=False, suffix='.wav', dir=temp_dir) as tmp_wav:
+                        tmp_wav_path = tmp_wav.name
+                        wavfile_write.write(tmp_wav_path, 16000, (audio_data * 32768.0).astype(np.int16))
+                    
+                    # Warte kurz, damit Datei sicher geschlossen ist
+                    time.sleep(0.1)
+                    
+                    # Lese Datei
+                    with open(tmp_wav_path, 'rb') as f:
+                        audio_bytes = f.read()
+                finally:
+                    # Lösche temporäre WAV-Datei mit Retry
+                    if tmp_wav_path:
+                        _safe_delete_file(tmp_wav_path)
+                
+                audio_base64 = base64.b64encode(audio_bytes).decode()
+                result = model_service_client.transcribe(audio_base64, language=language)
+                if result:
+                    text = result.get("text", "")
+                else:
+                    raise HTTPException(status_code=500, detail="Fehler bei Transkription über Model-Service")
+            else:
+                # Fallback: Nutze lokale Manager
+                text = whisper_manager.transcribe(audio_data, language=language)
+            
+            # Bestimme model_id
+            if USE_MODEL_SERVICE:
+                status = model_service_client.get_audio_model_status()
+                model_id = status.get("model_id") if status else None
+            else:
+                model_id = whisper_manager.get_current_model()
             
             return TranscribeAudioResponse(
                 text=text,
-                model_id=whisper_manager.get_current_model()
+                model_id=model_id
             )
             
         finally:
-            # Lösche temporäre Datei
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
+            # Lösche temporäre Datei mit Retry-Mechanismus
+            _safe_delete_file(tmp_path)
         
     except Exception as e:
         logger.error(f"Fehler bei der Audio-Transkription: {e}")
@@ -603,47 +2001,277 @@ async def transcribe_audio(file: UploadFile = File(...), language: Optional[str]
 @app.post("/image/generate", response_model=GenerateImageResponse)
 async def generate_image(request: GenerateImageRequest):
     """Generiert ein Bild basierend auf einem Prompt"""
-    # Lade Modell falls angegeben und noch nicht geladen
-    if request.model_id:
-        if image_manager.get_current_model() != request.model_id:
-            success = image_manager.load_model(request.model_id)
-            if not success:
-                raise HTTPException(status_code=400, detail=f"Fehler beim Laden des Bildgenerierungsmodells: {request.model_id}")
-    elif not image_manager.is_model_loaded():
-        # Lade Default-Bildmodell falls vorhanden
-        available_models = image_manager.get_available_models()
-        if available_models:
-            default_model_id = list(available_models.keys())[0]
-            logger.info(f"Lade Default-Bildgenerierungsmodell: {default_model_id}")
-            image_manager.load_model(default_model_id)
+    
+    if not image_manager:
+        raise HTTPException(status_code=503, detail="Bildgenerierung nicht verfügbar (diffusers/xformers nicht installiert)")
+    
+    # Bestimme welches Modell verwendet werden soll
+    model_to_use = request.model_id
+    
+    if not model_to_use:
+        if USE_MODEL_SERVICE:
+            # Prüfe Model-Service Status
+            status = model_service_client.get_image_model_status()
+            if status and status.get("loaded"):
+                model_to_use = status.get("model_id")
+            else:
+                # Lade Default-Bildmodell falls vorhanden
+                if image_manager:
+                    available_models = image_manager.get_available_models()
+                    if available_models:
+                        model_to_use = list(available_models.keys())[0]
+                    else:
+                        raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell geladen und kein Modell verfügbar")
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell verfügbar")
         else:
-            raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell geladen und kein Modell verfügbar")
+            # Fallback auf lokale Manager
+            if image_manager and image_manager.is_model_loaded():
+                model_to_use = image_manager.get_current_model()
+            else:
+                # Lade Default-Bildmodell falls vorhanden
+                if image_manager:
+                    available_models = image_manager.get_available_models()
+                    if available_models:
+                        model_to_use = list(available_models.keys())[0]
+                    else:
+                        raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell geladen und kein Modell verfügbar")
+                else:
+                    raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell verfügbar")
+    
+    # Stelle sicher dass Modell geladen ist
+    if USE_MODEL_SERVICE:
+        # Nutze Model-Service
+        status = model_service_client.get_image_model_status()
+        if status and status.get("loaded") and status.get("model_id") == model_to_use:
+            # Modell ist bereits geladen
+            model_ready = True
+        else:
+            # Prüfe ob Modell bereits geladen wird (im Model Service)
+            # Der Model Service prüft intern, ob das Modell bereits geladen ist
+            # Modell muss geladen werden
+            if not model_service_client.load_image_model(model_to_use):
+                raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Bildmodells: {model_to_use}")
+            model_ready = True
+    else:
+        # Fallback: Nutze lokale Manager
+        model_ready = await ensure_image_model_loaded(model_to_use, request.conversation_id)
+    
+    # Wenn Modell noch nicht geladen ist, gib Status zurück
+    if not model_ready:
+        
+        raise HTTPException(
+            status_code=202,  # Accepted - wird verarbeitet
+            detail={
+                "status": "model_loading",
+                "message": f"Bildmodell {model_to_use} wird geladen. Bitte warten Sie.",
+                "model_id": model_to_use,
+                "conversation_id": request.conversation_id
+            }
+        )
     
     try:
+        
+        
+        # Prüfe dynamisch ob Model-Service verfügbar ist
+        use_model_service = check_model_service_available()
+        
         # Generiere Bild
-        image = image_manager.generate_image(
-            prompt=request.prompt,
-            negative_prompt=request.negative_prompt,
-            num_inference_steps=request.num_inference_steps,
-            guidance_scale=request.guidance_scale,
-            width=request.width,
-            height=request.height
-        )
+        if use_model_service:
+            # Nutze Model-Service
+            result = model_service_client.generate_image(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                width=request.width,
+                height=request.height,
+                aspect_ratio=request.aspect_ratio
+            )
+            if result:
+                image_base64 = result.get("image_base64", "")
+                model_id = result.get("model_id", model_to_use)
+                actual_width = result.get("width", request.width)
+                actual_height = result.get("height", request.height)
+                auto_resized = result.get("auto_resized", False)
+                cpu_offload_used = result.get("cpu_offload_used", False)
+                
+                # Speichere Bild automatisch (dekodiere Base64 zu PIL Image)
+                try:
+                    import base64
+                    image_data = base64.b64decode(image_base64)
+                    image = Image.open(io.BytesIO(image_data))
+                    saved_path = save_generated_image(image, request.prompt)
+                    if saved_path:
+                        logger.info(f"Bild gespeichert: {saved_path}")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Speichern des Bildes vom Model-Service: {e}")
+                
+                return GenerateImageResponse(
+                    image_base64=image_base64,
+                    model_id=model_id,
+                    width=actual_width,
+                    height=actual_height,
+                    auto_resized=auto_resized,
+                    cpu_offload_used=cpu_offload_used
+                )
+            else:
+                raise HTTPException(status_code=500, detail="Fehler bei Bildgenerierung über Model-Service")
+        else:
+            # Fallback: Nutze lokale Manager
+            if not image_manager:
+                raise HTTPException(status_code=503, detail="Bildgenerierung nicht verfügbar")
+            
+            result = image_manager.generate_image(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                num_inference_steps=request.num_inference_steps,
+                guidance_scale=request.guidance_scale,
+                width=request.width,
+                height=request.height,
+                aspect_ratio=request.aspect_ratio
+            )
+            
+            if result is None or result.get("image") is None:
+                raise HTTPException(status_code=500, detail="Bildgenerierung fehlgeschlagen")
+            
+            image = result["image"]
+            actual_width = result.get("width", request.width)
+            actual_height = result.get("height", request.height)
+            auto_resized = result.get("auto_resized", False)
+            cpu_offload_used = result.get("cpu_offload_used", False)
+            
+            # Konvertiere zu Base64
+            image_base64 = image_manager.image_to_base64(image)
+            model_id = image_manager.get_current_model()
+            
+            # Speichere Bild automatisch mit Timestamp und Prompt
+            saved_path = save_generated_image(image, request.prompt)
+            if saved_path:
+                logger.info(f"Bild gespeichert: {saved_path}")
         
-        if image is None:
-            raise HTTPException(status_code=500, detail="Bildgenerierung fehlgeschlagen")
         
-        # Konvertiere zu Base64
-        image_base64 = image_manager.image_to_base64(image)
+        
+        # Speichere Bild in Conversation wenn conversation_id vorhanden
+        if request.conversation_id:
+            # Speichere User-Prompt
+            conversation_manager.add_message(
+                conversation_id=request.conversation_id,
+                role="user",
+                content=request.prompt
+            )
+            # Speichere Bild als Message mit speziellem Format
+            conversation = conversation_manager.get_conversation(request.conversation_id)
+            if conversation:
+                conversation["messages"].append({
+                    "role": "assistant",
+                    "content": "image",
+                    "image_base64": image_base64,
+                    "prompt": request.prompt,
+                    "timestamp": datetime.now().isoformat()
+                })
+                conversation["updated_at"] = datetime.now().isoformat()
+                conversation_manager._save_conversation(conversation)
         
         return GenerateImageResponse(
             image_base64=image_base64,
-            model_id=image_manager.get_current_model()
+            model_id=model_id,
+            width=actual_width,
+            height=actual_height,
+            auto_resized=auto_resized,
+            cpu_offload_used=cpu_offload_used
         )
         
     except Exception as e:
+        
         logger.error(f"Fehler bei der Bildgenerierung: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Fehler bei der Bildgenerierung: {str(e)}")
+
+
+# Model-Service Management Endpoints (für Frontend)
+
+@app.get("/model-service/status")
+async def get_model_service_status():
+    """Gibt Status aller Modelle vom Model-Service zurück"""
+    if not USE_MODEL_SERVICE:
+        raise HTTPException(status_code=503, detail="Model-Service ist nicht verfügbar")
+    
+    status = model_service_client.get_status()
+    if status:
+        return status
+    else:
+        raise HTTPException(status_code=500, detail="Fehler beim Abrufen des Model-Service-Status")
+
+
+@app.get("/model-service/models/{model_type}/status")
+async def get_model_status(model_type: str):
+    """Gibt Status eines bestimmten Modell-Typs zurück"""
+    if not USE_MODEL_SERVICE:
+        raise HTTPException(status_code=503, detail="Model-Service ist nicht verfügbar")
+    
+    if model_type == "text":
+        status = model_service_client.get_text_model_status()
+    elif model_type == "audio":
+        status = model_service_client.get_audio_model_status()
+    elif model_type == "image":
+        status = model_service_client.get_image_model_status()
+    else:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Modell-Typ: {model_type}")
+    
+    if status:
+        return status
+    else:
+        raise HTTPException(status_code=500, detail="Fehler beim Abrufen des Modell-Status")
+
+
+class LoadModelRequestModelService(BaseModel):
+    model_id: str
+
+
+@app.post("/model-service/models/{model_type}/load")
+async def load_model_via_service(model_type: str, request: LoadModelRequestModelService):
+    """Lädt ein Modell über den Model-Service"""
+    if not USE_MODEL_SERVICE:
+        raise HTTPException(status_code=503, detail="Model-Service ist nicht verfügbar")
+    
+    success = False
+    if model_type == "text":
+        success = model_service_client.load_text_model(request.model_id)
+    elif model_type == "audio":
+        success = model_service_client.load_audio_model(request.model_id)
+    elif model_type == "image":
+        success = model_service_client.load_image_model(request.model_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Modell-Typ: {model_type}")
+    
+    if success:
+        return {"status": "success", "message": f"Modell {request.model_id} wird geladen"}
+    else:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Modells: {request.model_id}")
+
+
+@app.post("/model-service/models/{model_type}/unload")
+async def unload_model_via_service(model_type: str):
+    """Entlädt ein Modell über den Model-Service"""
+    if not USE_MODEL_SERVICE:
+        raise HTTPException(status_code=503, detail="Model-Service ist nicht verfügbar")
+    
+    success = False
+    if model_type == "text":
+        success = model_service_client.unload_text_model()
+    elif model_type == "audio":
+        success = model_service_client.unload_audio_model()
+    elif model_type == "image":
+        success = model_service_client.unload_image_model()
+    else:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Modell-Typ: {model_type}")
+    
+    if success:
+        return {"status": "success", "message": f"{model_type}-Modell wurde entladen"}
+    else:
+        raise HTTPException(status_code=500, detail=f"Fehler beim Entladen des {model_type}-Modells")
 
 
 # Statische Dateien für Frontend
@@ -652,66 +2280,17 @@ if os.path.exists(frontend_dir):
     app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 if __name__ == "__main__":
-    # #region agent log
-    try:
-        with open(log_path, 'ab') as f:
-            log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:230","message":"Before uvicorn import","data":{},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-            f.write(log_entry.encode('utf-8'))
-    except: pass
-    # #endregion
+    
     
     import uvicorn
     
-    # #region agent log
-    try:
-        with open(log_path, 'ab') as f:
-            log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:235","message":"Before uvicorn.run","data":{"host":"127.0.0.1","port":8000},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-            f.write(log_entry.encode('utf-8'))
-    except: pass
-    # #endregion
+    
     
     try:
-        # #region agent log
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            port_check = sock.connect_ex(('127.0.0.1', 8000))
-            sock.close()
-            port_available = port_check != 0
-            with open(log_path, 'ab') as f:
-                log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"main.py:245","message":"Port 8000 check before start","data":{"port_available":port_available,"port_check_result":port_check},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-                f.write(log_entry.encode('utf-8'))
-            if not port_available:
-                # Port ist belegt - versuche Prozess zu finden
-                try:
-                    import subprocess
-                    result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True, timeout=2)
-                    for line in result.stdout.split('\n'):
-                        if ':8000' in line and 'LISTENING' in line:
-                            parts = line.split()
-                            if len(parts) > 4:
-                                pid = parts[-1]
-                                with open(log_path, 'ab') as f:
-                                    log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"main.py:255","message":"Port 8000 occupied by PID","data":{"pid":pid},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-                                    f.write(log_entry.encode('utf-8'))
-                except: pass
-        except Exception as port_e:
-            try:
-                with open(log_path, 'ab') as f:
-                    log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C","location":"main.py:260","message":"Port check failed","data":{"error":str(port_e)},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-                    f.write(log_entry.encode('utf-8'))
-            except: pass
-        # #endregion
+        
         
         uvicorn.run(app, host="127.0.0.1", port=8000)
     except Exception as e:
-        # #region agent log
-        try:
-            with open(log_path, 'ab') as f:
-                log_entry = json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"D","location":"main.py:255","message":"uvicorn.run exception","data":{"error":str(e),"error_type":type(e).__name__},"timestamp":int(__import__('time').time()*1000)}) + '\n'
-                f.write(log_entry.encode('utf-8'))
-        except: pass
-        # #endregion
+        
         raise
 

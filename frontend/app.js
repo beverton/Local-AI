@@ -6,12 +6,12 @@ let currentConversationId = null;
 let currentModel = null;
 let currentAbortController = null;
 let currentImageAbortController = null;
-let currentTab = 'chat';
 let uploadedFilesList = []; // Liste der hochgeladenen Dateien
 let settings = {
     temperature: 0.3,  // Niedriger für bessere Qualität (weniger "Jibberish")
-    maxLength: 512,
-    preferenceLearning: false
+    maxLength: 2048,
+    preferenceLearning: false,
+    transcriptionLanguage: ""  // Leerer String = Auto-Erkennung
 };
 
 // DOM Elements
@@ -20,13 +20,23 @@ const chatMessages = document.getElementById('chatMessages');
 const messageInput = document.getElementById('messageInput');
 const btnSend = document.getElementById('btnSend');
 const btnNewChat = document.getElementById('btnNewChat');
-const modelSelect = document.getElementById('modelSelect');
-const imageModelSelect = document.getElementById('imageModelSelect');
+const btnNewImage = document.getElementById('btnNewImage');
+// imageModelSelect entfernt - Modellauswahl erfolgt über Model-Service
+const modelStatusText = document.getElementById('modelStatusText');
+const modelStatusAudio = document.getElementById('modelStatusAudio');
+const modelStatusImage = document.getElementById('modelStatusImage');
 const chatTitle = document.getElementById('chatTitle');
 const statusText = document.getElementById('statusText');
+const statusTextValue = document.getElementById('statusTextValue');
+const statusImageValue = document.getElementById('statusImageValue');
+const statusAudioValue = document.getElementById('statusAudioValue');
+const statusTextModel = document.getElementById('statusTextModel');
+const statusImageModel = document.getElementById('statusImageModel');
+const statusAudioModel = document.getElementById('statusAudioModel');
 const settingsPanel = document.getElementById('settingsPanel');
 const btnSettings = document.getElementById('btnSettings');
 const btnCloseSettings = document.getElementById('btnCloseSettings');
+const btnRestart = document.getElementById('btnRestart');
 const preferenceToggle = document.getElementById('preferenceToggle');
 const btnResetPreferences = document.getElementById('btnResetPreferences');
 const temperatureSlider = document.getElementById('temperatureSlider');
@@ -37,28 +47,110 @@ const cpuPercent = document.getElementById('cpuPercent');
 const ramPercent = document.getElementById('ramPercent');
 const gpuPercent = document.getElementById('gpuPercent');
 const btnCancel = document.getElementById('btnCancel');
-const tabChat = document.getElementById('tabChat');
-const tabImage = document.getElementById('tabImage');
+const cpuThreadsSlider = document.getElementById('cpuThreadsSlider');
+const cpuThreadsValue = document.getElementById('cpuThreadsValue');
+const gpuOptimizationSelect = document.getElementById('gpuOptimizationSelect');
+const disableCpuOffload = document.getElementById('disableCpuOffload');
+const btnApplyPerformance = document.getElementById('btnApplyPerformance');
 const chatInputContainer = document.getElementById('chatInputContainer');
 const imageInputContainer = document.getElementById('imageInputContainer');
 const imagePromptInput = document.getElementById('imagePromptInput');
 const btnGenerateImage = document.getElementById('btnGenerateImage');
 const btnCancelImage = document.getElementById('btnCancelImage');
+const imageSizeModeRatio = document.getElementById('imageSizeModeRatio');
+const imageSizeModeCustom = document.getElementById('imageSizeModeCustom');
+const ratioModeContainer = document.getElementById('ratioModeContainer');
+const customSizeModeContainer = document.getElementById('customSizeModeContainer');
+const imageResolutionPreset = document.getElementById('imageResolutionPreset');
+const imageAspectRatio = document.getElementById('imageAspectRatio');
+const customRatioContainer = document.getElementById('customRatioContainer');
+const customRatioW = document.getElementById('customRatioW');
+const customRatioH = document.getElementById('customRatioH');
+const ratioPreview = document.getElementById('ratioPreview');
+const imageWidth = document.getElementById('imageWidth');
+const imageHeight = document.getElementById('imageHeight');
+
+// Auflösungs-Presets (werden vom Backend geladen)
+let resolutionPresets = { s: 512, m: 720, l: 1024 };
 const btnUpload = document.getElementById('btnUpload');
 const fileInput = document.getElementById('fileInput');
 const uploadedFiles = document.getElementById('uploadedFiles');
 const fileUploadArea = document.getElementById('fileUploadArea');
 const btnMicrophone = document.getElementById('btnMicrophone');
+const btnAgentMode = document.getElementById('btnAgentMode');
+const conversationModelSelect = document.getElementById('conversationModelSelect');
+const btnModelManager = document.getElementById('btnModelManager');
+
+// Helper-Funktion für Status-Updates
+function updateModelStatus(modelType, status, modelId = null) {
+    let statusElement, statusValueElement;
+    
+    switch(modelType) {
+        case 'text':
+            statusElement = statusTextModel;
+            statusValueElement = statusTextValue;
+            break;
+        case 'image':
+            statusElement = statusImageModel;
+            statusValueElement = statusImageValue;
+            break;
+        case 'audio':
+            statusElement = statusAudioModel;
+            statusValueElement = statusAudioValue;
+            break;
+        default:
+            return;
+    }
+    
+    if (!statusElement || !statusValueElement) return;
+    
+    // Zeige Statusanzeige wenn Status nicht "Bereit" oder leer
+    if (status && status !== 'Bereit' && status !== '-') {
+        statusElement.style.display = 'flex';
+        statusValueElement.textContent = status;
+    } else if (modelId) {
+        // Modell geladen - zeige Modell-ID
+        statusElement.style.display = 'flex';
+        statusValueElement.textContent = modelId || 'Bereit';
+    } else {
+        // Verstecke wenn kein Status
+        statusElement.style.display = 'none';
+    }
+}
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    // WICHTIG: setupEventListeners ZUERST aufrufen, damit Event-Listener registriert werden
+    setupEventListeners();
+    
     loadModels();
-    loadImageModels();
+    // loadImageModels() entfernt - Modellauswahl erfolgt über Model-Service
     loadConversations();
     loadStatus();
     loadPreferences();
-    setupEventListeners();
+    loadPerformanceSettings();
+    loadAudioSettings();
     startSystemStatsUpdate();
+    
+    // Lade initialen Status einmalig (kein automatisches Polling mehr)
+    loadModelServiceStatus();
+    
+    // Debug: Prüfe ob Buttons gefunden wurden
+    if (!btnMicrophone) {
+        console.error('btnMicrophone nicht gefunden!');
+    } else {
+        console.log('✓ btnMicrophone gefunden und Event-Listener sollte registriert sein');
+    }
+    if (!btnUpload) {
+        console.error('btnUpload nicht gefunden!');
+    } else {
+        console.log('✓ btnUpload gefunden und Event-Listener sollte registriert sein');
+    }
+    if (!fileInput) {
+        console.error('fileInput nicht gefunden!');
+    } else {
+        console.log('✓ fileInput gefunden');
+    }
 });
 
 // Event Listeners
@@ -76,12 +168,19 @@ function setupEventListeners() {
         autoResizeTextarea();
     });
     btnNewChat.addEventListener('click', createNewConversation);
+    btnNewImage.addEventListener('click', createNewImageConversation);
     btnSettings.addEventListener('click', () => {
         settingsPanel.classList.add('open');
     });
     btnCloseSettings.addEventListener('click', () => {
         settingsPanel.classList.remove('open');
     });
+    if (btnRestart) {
+        btnRestart.addEventListener('click', restartServer);
+    }
+    if (btnAgentMode) {
+        btnAgentMode.addEventListener('click', toggleAgentMode);
+    }
     preferenceToggle.addEventListener('change', togglePreferenceLearning);
     btnResetPreferences.addEventListener('click', resetPreferences);
     temperatureSlider.addEventListener('input', (e) => {
@@ -92,15 +191,76 @@ function setupEventListeners() {
         settings.maxLength = parseInt(e.target.value);
         maxLengthValue.textContent = settings.maxLength;
     });
-    tabChat.addEventListener('click', () => switchTab('chat'));
-    tabImage.addEventListener('click', () => switchTab('image'));
+    cpuThreadsSlider.addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        cpuThreadsValue.textContent = value === 0 ? 'Auto' : value;
+    });
+    btnApplyPerformance.addEventListener('click', applyPerformanceSettings);
+    
+    // Audio-Einstellungen
+    const transcriptionLanguageSelect = document.getElementById('transcriptionLanguageSelect');
+    if (transcriptionLanguageSelect) {
+        transcriptionLanguageSelect.addEventListener('change', (e) => {
+            settings.transcriptionLanguage = e.target.value || "";
+            saveAudioSettings();
+        });
+    }
     btnGenerateImage.addEventListener('click', generateImage);
     btnCancelImage.addEventListener('click', cancelImageGeneration);
     imagePromptInput.addEventListener('input', () => {
         btnGenerateImage.disabled = imagePromptInput.value.trim() === '';
+        autoResizeImageTextarea();
     });
-    btnUpload.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', handleFileSelect);
+    
+    // Größen-Modus Event-Listener
+    if (imageSizeModeRatio && imageSizeModeCustom) {
+        imageSizeModeRatio.addEventListener('change', handleSizeModeChange);
+        imageSizeModeCustom.addEventListener('change', handleSizeModeChange);
+    }
+    
+    // Ratio-Modus Event-Listener
+    if (imageResolutionPreset) {
+        imageResolutionPreset.addEventListener('change', updateRatioPreview);
+    }
+    if (imageAspectRatio) {
+        imageAspectRatio.addEventListener('change', handleAspectRatioChange);
+    }
+    if (customRatioW && customRatioH) {
+        customRatioW.addEventListener('input', handleCustomRatioChange);
+        customRatioH.addEventListener('input', handleCustomRatioChange);
+    }
+    
+    // Lade Preset-Werte vom Backend (optional - kann später implementiert werden)
+    // loadResolutionPresets();
+    
+    // Initialisiere UI-Modus
+    if (imageSizeModeRatio && imageSizeModeCustom) {
+        handleSizeModeChange(); // Setze initialen Zustand
+    }
+    if (btnUpload && fileInput) {
+        btnUpload.addEventListener('click', (e) => {
+            console.log('btnUpload clicked!', e);
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            console.log('Triggering fileInput.click()');
+            fileInput.click();
+        }, true); // useCapture = true, damit Event früher gefangen wird
+        fileInput.addEventListener('change', handleFileSelect);
+        console.log('btnUpload Event-Listener registriert', btnUpload);
+    } else {
+        console.error('btnUpload oder fileInput nicht verfügbar:', {btnUpload, fileInput});
+    }
+    
+    // Conversation Model Select (Settings)
+    if (conversationModelSelect) {
+        conversationModelSelect.addEventListener('change', async (e) => {
+            const modelId = e.target.value || null;
+            if (currentConversationId) {
+                await setConversationModel(currentConversationId, modelId);
+            }
+        });
+    }
     
     // Drag & Drop
     fileUploadArea.addEventListener('dragover', (e) => {
@@ -118,27 +278,132 @@ function setupEventListeners() {
     });
     
     // Microphone recording
-    btnMicrophone.addEventListener('click', toggleMicrophone);
+    if (btnMicrophone) {
+        btnMicrophone.addEventListener('click', (e) => {
+            console.log('btnMicrophone clicked!', e);
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            toggleMicrophone();
+        }, true); // useCapture = true
+        console.log('btnMicrophone Event-Listener registriert', btnMicrophone);
+    } else {
+        console.error('btnMicrophone nicht verfügbar');
+    }
 }
 
-function switchTab(tab) {
-    currentTab = tab;
-    if (tab === 'chat') {
-        tabChat.classList.add('active');
-        tabImage.classList.remove('active');
-        chatInputContainer.style.display = 'block';
-        imageInputContainer.style.display = 'none';
-    } else {
-        tabChat.classList.remove('active');
-        tabImage.classList.add('active');
-        chatInputContainer.style.display = 'none';
-        imageInputContainer.style.display = 'block';
+// switchTab Funktion entfernt - wird nicht mehr benötigt
+
+// Image Size Mode Handler
+function handleSizeModeChange() {
+    if (!imageSizeModeRatio || !imageSizeModeCustom || !ratioModeContainer || !customSizeModeContainer) {
+        return;
+    }
+    
+    if (imageSizeModeRatio.checked) {
+        // Ratio-Modus aktivieren
+        ratioModeContainer.style.display = 'block';
+        customSizeModeContainer.style.display = 'none';
+    } else if (imageSizeModeCustom.checked) {
+        // Custom Size-Modus aktivieren
+        ratioModeContainer.style.display = 'none';
+        customSizeModeContainer.style.display = 'block';
     }
 }
 
 function autoResizeTextarea() {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
+}
+
+function autoResizeImageTextarea() {
+    imagePromptInput.style.height = 'auto';
+    imagePromptInput.style.height = Math.min(imagePromptInput.scrollHeight, 200) + 'px';
+}
+
+// Image Size Ratio Functions
+function updateRatioPreview() {
+    if (!ratioPreview || !imageResolutionPreset || !imageAspectRatio) {
+        return;
+    }
+    
+    const preset = imageResolutionPreset.value;
+    const ratio = imageAspectRatio.value;
+    
+    // Preset-Basis-Größe
+    let baseSize = 1024;
+    if (preset === 'm') {
+        baseSize = 720;
+    } else if (preset === 's') {
+        baseSize = 512;
+    }
+    
+    let width, height;
+    
+    if (ratio === 'custom' && customRatioW && customRatioH) {
+        const w = parseFloat(customRatioW.value) || 1;
+        const h = parseFloat(customRatioH.value) || 1;
+        if (w > 0 && h > 0) {
+            // Berechne Dimensionen basierend auf Preset und Custom Ratio
+            const aspectRatio = w / h;
+            if (aspectRatio >= 1) {
+                // Breiter als hoch
+                width = baseSize;
+                height = Math.round(baseSize / aspectRatio);
+            } else {
+                // Höher als breit
+                height = baseSize;
+                width = Math.round(baseSize * aspectRatio);
+            }
+        } else {
+            width = baseSize;
+            height = baseSize;
+        }
+    } else {
+        // Standard Aspect Ratios
+        const ratioParts = ratio.split(':');
+        if (ratioParts.length === 2) {
+            const w = parseFloat(ratioParts[0]);
+            const h = parseFloat(ratioParts[1]);
+            if (w > 0 && h > 0) {
+                const aspectRatio = w / h;
+                if (aspectRatio >= 1) {
+                    width = baseSize;
+                    height = Math.round(baseSize / aspectRatio);
+                } else {
+                    height = baseSize;
+                    width = Math.round(baseSize * aspectRatio);
+                }
+            } else {
+                width = baseSize;
+                height = baseSize;
+            }
+        } else {
+            width = baseSize;
+            height = baseSize;
+        }
+    }
+    
+    ratioPreview.textContent = `Dimensionen: ${width} x ${height} px`;
+}
+
+function handleAspectRatioChange() {
+    if (!imageAspectRatio || !customRatioContainer) {
+        return;
+    }
+    
+    const ratio = imageAspectRatio.value;
+    if (ratio === 'custom') {
+        customRatioContainer.style.display = 'block';
+    } else {
+        customRatioContainer.style.display = 'none';
+    }
+    
+    updateRatioPreview();
+}
+
+function handleCustomRatioChange() {
+    updateRatioPreview();
 }
 
 // API Functions
@@ -157,126 +422,299 @@ async function apiCall(endpoint, options = {}) {
             fetchOptions.signal = options.signal;
         }
         
+        // #region agent log
+        try {
+            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:172','message':'BEFORE fetch','data':{endpoint:endpoint},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        } catch(e) {}
+        // #endregion
         const response = await fetch(`${API_BASE}${endpoint}`, fetchOptions);
+        // #region agent log
+        try {
+            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:174','message':'AFTER fetch','data':{endpoint:endpoint,status:response.status,ok:response.ok},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        } catch(e) {}
+        // #endregion
         
         if (!response.ok) {
+            // Prüfe ob es ein "model_loading" Status ist (202 Accepted)
+            if (response.status === 202) {
+                const errorData = await response.json();
+                // #region agent log
+                try {
+                    fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:178','message':'202 response with model_loading','data':{endpoint:endpoint,errorData:errorData},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+                } catch(e) {}
+                // #endregion
+                if (errorData.detail && errorData.detail.status === "model_loading") {
+                    throw { name: "ModelLoading", detail: errorData.detail };
+                }
+            }
             const error = await response.json();
             throw new Error(error.detail || 'API Fehler');
         }
         
         return await response.json();
     } catch (error) {
+        // #region agent log
+        try {
+            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:187','message':'apiCall catch block','data':{endpoint:endpoint,errorName:error.name,errorMessage:error.message,errorType:error.constructor.name,isAbortError:error.name==='AbortError',isTypeError:error instanceof TypeError,isNetworkError:error.message&&(error.message.includes('Failed to fetch')||error.message.includes('NetworkError')||error.message.includes('CONNECTION_REFUSED'))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        } catch(e) {}
+        // #endregion
         console.error('API Error:', error);
+        
+        // Behandle spezifische Fehlertypen
+        // AbortError = Request wurde abgebrochen (normal, nicht als Netzwerkfehler behandeln)
+        if (error.name === 'AbortError') {
+            throw error; // Weiterwerfen als AbortError
+        }
+        
+        // TypeError mit "Failed to fetch" = echter Netzwerkfehler
+        // NetworkError = echter Netzwerkfehler
+        // CONNECTION_REFUSED = Server nicht erreichbar
+        const isRealNetworkError = (
+            (error instanceof TypeError && error.message && error.message.includes('Failed to fetch')) ||
+            error.name === 'NetworkError' ||
+            (error.message && (error.message.includes('CONNECTION_REFUSED') || error.message.includes('Network request failed')))
+        );
+        
+        if (isRealNetworkError) {
+            throw new Error('Netzwerkfehler: Server nicht erreichbar. Bitte prüfen Sie, ob der Server läuft.');
+        }
+        
+        // Alle anderen Fehler weiterwerfen (inkl. ModelLoading, etc.)
         throw error;
     }
 }
 
-async function loadModels() {
-    try {
-        const data = await apiCall('/models');
-        modelSelect.innerHTML = '<option value="">Modell auswählen...</option>';
-        
-        // Nur Text-Modelle (keine Image-Modelle)
-        for (const [id, model] of Object.entries(data.models)) {
-            if (model.type !== 'image') {  // Überspringe Bildgenerierungsmodelle
-                const option = document.createElement('option');
-                option.value = id;
-                option.textContent = model.name;
-                if (id === data.current_model) {
-                    option.selected = true;
-                    currentModel = id;
+async function waitForModelLoad(modelType, modelId, conversationId = null) {
+    /**
+     * Wartet bis ein Modell geladen ist.
+     * Pollt den Status-Endpoint bis Modell fertig ist.
+     * 
+     * @param {string} modelType - "text", "image" oder "audio"
+     * @param {string} modelId - Die ID des Modells
+     * @param {string|null} conversationId - Optional - ID der Conversation die das Modell benötigt
+     * @returns {Promise<boolean>} True wenn Modell geladen ist
+     */
+    const statusEndpoint = modelType === "text" ? "/models/load/status" : 
+                          modelType === "image" ? "/image/models/load/status" : 
+                          "/audio/models/load/status";
+    const maxAttempts = 24; // Max 2 Minuten (5 Sekunden pro Poll)
+    let attempts = 0;
+    
+    // Erstelle Fortschrittsanzeige im Chat-Feld
+    let progressMessageId = null;
+    let progressBar = null;
+    let progressText = null;
+    
+    if (conversationId) {
+        // Zeige Fortschrittsanzeige nur wenn wir in einer Conversation sind
+        progressMessageId = addMessageToChat('assistant', `Lädt Modell ${modelId}...`, true);
+        const progressMsg = document.getElementById(progressMessageId);
+        if (progressMsg) {
+            const contentDiv = progressMsg.querySelector('.message-content');
+            if (contentDiv) {
+                contentDiv.innerHTML = `
+                    <div>Lädt Modell ${modelId}...</div>
+                    <div class="model-loading-progress">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="model-progress-bar-${progressMessageId}"></div>
+                        </div>
+                        <div class="progress-text" id="model-progress-text-${progressMessageId}">0%</div>
+                    </div>
+                `;
+                progressBar = document.getElementById(`model-progress-bar-${progressMessageId}`);
+                progressText = document.getElementById(`model-progress-text-${progressMessageId}`);
+            }
+        }
+    }
+    
+    const startTime = Date.now();
+    const estimatedDuration = 60000; // Geschätzte Dauer: 60 Sekunden
+    
+    while (attempts < maxAttempts) {
+        try {
+            const status = await apiCall(statusEndpoint);
+            
+            // Update Fortschrittsanzeige basierend auf Zeit
+            if (progressBar && progressText) {
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min((elapsed / estimatedDuration) * 100, 95); // Max 95% bis fertig
+                progressBar.style.width = `${progress}%`;
+                progressText.textContent = `${Math.round(progress)}%`;
+            }
+            
+            if (!status.loading) {
+                // Modell-Laden abgeschlossen
+                if (status.error) {
+                    // Entferne Fortschrittsanzeige bei Fehler
+                    if (progressMessageId) {
+                        const progressMsg = document.getElementById(progressMessageId);
+                        if (progressMsg) {
+                            progressMsg.remove();
+                        }
+                    }
+                    throw new Error(status.error);
                 }
-                modelSelect.appendChild(option);
+                if (status.model_id === modelId) {
+                    // Entferne Fortschrittsanzeige bei Erfolg
+                    if (progressMessageId) {
+                        const progressMsg = document.getElementById(progressMessageId);
+                        if (progressMsg) {
+                            progressMsg.remove();
+                        }
+                    }
+                    return true; // Modell erfolgreich geladen
+                }
+            }
+            
+            // Warte 500ms bevor nächster Poll (für schnellere Updates)
+            await new Promise(resolve => setTimeout(resolve, 500));
+            attempts++;
+        } catch (error) {
+            // Bei Netzwerkfehlern (Server-Neustart), versuche es nochmal ohne zu loggen
+            if (error.message && (error.message.includes('fetch') || error.message.includes('Netzwerkfehler') || error.message.includes('CONNECTION_REFUSED'))) {
+                // Server könnte neu gestartet haben - warte länger und versuche es nochmal
+                if (attempts < maxAttempts - 1) { // Nur wenn noch Versuche übrig sind
+                    attempts++;
+                    await new Promise(resolve => setTimeout(resolve, 3000)); // Warte länger bei Netzwerkfehlern
+                    continue;
+                }
+            }
+            // Entferne Fortschrittsanzeige bei Fehler
+            if (progressMessageId) {
+                const progressMsg = document.getElementById(progressMessageId);
+                if (progressMsg) {
+                    progressMsg.remove();
+                }
+            }
+            // Nur andere Fehler loggen
+            if (!error.message || (!error.message.includes('fetch') && !error.message.includes('Netzwerkfehler') && !error.message.includes('CONNECTION_REFUSED'))) {
+                console.error('Fehler beim Prüfen des Modell-Status:', error);
+            }
+            throw error;
+        }
+    }
+    
+    // Entferne Fortschrittsanzeige bei Timeout
+    if (progressMessageId) {
+        const progressMsg = document.getElementById(progressMessageId);
+        if (progressMsg) {
+            progressMsg.remove();
+        }
+    }
+    
+    throw new Error("Timeout beim Warten auf Modell-Laden (mehr als 2 Minuten)");
+}
+
+// Lade Model-Service-Status
+async function loadModelServiceStatus() {
+    try {
+        const response = await fetch('/model-service/status');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const status = await response.json();
+        
+        // Update Text-Modell Status
+        if (status.text_model) {
+            const textStatus = status.text_model;
+            if (textStatus.loaded) {
+                modelStatusText.textContent = textStatus.model_id || 'Geladen';
+                modelStatusText.style.color = 'var(--success)';
+            } else if (textStatus.loading) {
+                modelStatusText.textContent = 'Lädt...';
+                modelStatusText.style.color = 'var(--warning)';
+            } else {
+                modelStatusText.textContent = 'Nicht geladen';
+                modelStatusText.style.color = 'var(--text-secondary)';
             }
         }
         
-        // Event-Listener nur einmal hinzufügen
-        if (!modelSelect.hasAttribute('data-listener-added')) {
-            modelSelect.addEventListener('change', async (e) => {
-                const modelId = e.target.value;
-                if (modelId) {
-                    await loadModel(modelId);
-                }
-            });
-            modelSelect.setAttribute('data-listener-added', 'true');
+        // Update Audio-Modell Status
+        if (status.audio_model) {
+            const audioStatus = status.audio_model;
+            if (audioStatus.loaded) {
+                modelStatusAudio.textContent = audioStatus.model_id || 'Geladen';
+                modelStatusAudio.style.color = 'var(--success)';
+            } else if (audioStatus.loading) {
+                modelStatusAudio.textContent = 'Lädt...';
+                modelStatusAudio.style.color = 'var(--warning)';
+            } else {
+                modelStatusAudio.textContent = 'Nicht geladen';
+                modelStatusAudio.style.color = 'var(--text-secondary)';
+            }
         }
+        
+        // Update Image-Modell Status
+        if (status.image_model) {
+            const imageStatus = status.image_model;
+            if (imageStatus.loaded) {
+                modelStatusImage.textContent = imageStatus.model_id || 'Geladen';
+                modelStatusImage.style.color = 'var(--success)';
+            } else if (imageStatus.loading) {
+                modelStatusImage.textContent = 'Lädt...';
+                modelStatusImage.style.color = 'var(--warning)';
+            } else {
+                modelStatusImage.textContent = 'Nicht geladen';
+                modelStatusImage.style.color = 'var(--text-secondary)';
+            }
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden des Model-Service-Status:', error);
+        // Zeige Fehler-Status
+        if (modelStatusText) modelStatusText.textContent = 'Fehler';
+        if (modelStatusAudio) modelStatusAudio.textContent = 'Fehler';
+        if (modelStatusImage) modelStatusImage.textContent = 'Fehler';
+    }
+}
+
+async function loadModels() {
+    // Diese Funktion wird nicht mehr benötigt, aber für Conversation-Modell-Auswahl behalten
+    try {
+        // Lade Modelle nur für Conversation-Modell-Auswahl
+        await loadConversationModels();
     } catch (error) {
         console.error('Fehler beim Laden der Modelle:', error);
     }
 }
 
-async function loadImageModels() {
+async function loadConversationModels() {
     try {
-        const data = await apiCall('/image/models');
-        imageModelSelect.innerHTML = '<option value="">Bildmodell auswählen...</option>';
+        const data = await apiCall('/models');
+        const optionsHtml = '<option value="">Globales Modell verwenden</option>';
         
+        // Nur Text-Modelle (keine Image- oder Audio-Modelle)
+        let options = '';
         for (const [id, model] of Object.entries(data.models)) {
-            const option = document.createElement('option');
-            option.value = id;
-            option.textContent = model.name;
-            if (id === data.current_model) {
-                option.selected = true;
+            if (model.type !== 'image' && model.type !== 'audio') {
+                options += `<option value="${id}">${escapeHtml(model.name)}</option>`;
             }
-            imageModelSelect.appendChild(option);
         }
         
-        // Event-Listener für Bildmodell-Auswahl
-        if (!imageModelSelect.hasAttribute('data-listener-added')) {
-            imageModelSelect.addEventListener('change', async (e) => {
-                const modelId = e.target.value;
-                if (modelId) {
-                    await loadImageModel(modelId);
-                }
-            });
-            imageModelSelect.setAttribute('data-listener-added', 'true');
+        // Update both selectors
+        if (conversationModelSelect) {
+            conversationModelSelect.innerHTML = optionsHtml + options;
         }
     } catch (error) {
-        console.error('Fehler beim Laden der Bildmodelle:', error);
-        imageModelSelect.innerHTML = '<option value="">Fehler beim Laden</option>';
+        console.error('Fehler beim Laden der Conversation-Modelle:', error);
     }
 }
 
-async function loadImageModel(modelId) {
-    try {
-        statusText.textContent = 'Lade Bildmodell...';
-        await apiCall('/image/models/load', {
-            method: 'POST',
-            body: JSON.stringify({ model_id: modelId })
-        });
-        statusText.textContent = 'Bildmodell geladen';
-        setTimeout(() => {
-            statusText.textContent = 'Bereit';
-        }, 2000);
-    } catch (error) {
-        console.error('Fehler beim Laden des Bildmodells:', error);
-        statusText.textContent = 'Fehler beim Laden';
-        alert('Fehler beim Laden des Bildmodells: ' + error.message);
-    }
-}
+// loadImageModels() entfernt - Modellauswahl erfolgt automatisch über Model-Service
+// loadImageModel() entfernt - Modellauswahl erfolgt automatisch über Model-Service
+// pollImageModelLoadStatus() entfernt - nicht mehr benötigt
 
-async function loadModel(modelId) {
-    try {
-        statusText.textContent = 'Lade Modell...';
-        await apiCall('/models/load', {
-            method: 'POST',
-            body: JSON.stringify({ model_id: modelId })
-        });
-        currentModel = modelId;
-        statusText.textContent = 'Modell geladen';
-        await loadStatus();
-    } catch (error) {
-        statusText.textContent = 'Fehler beim Laden';
-        alert('Fehler beim Laden des Modells: ' + error.message);
-    }
-}
+// loadModel Funktion entfernt - Modelle werden jetzt über Model-Service verwaltet
+// Benutzer sollten den Model Manager verwenden, um Modelle zu laden
+
+// pollModelLoadStatus Funktion entfernt - Status wird jetzt über Model-Service-Status angezeigt
 
 async function loadStatus() {
     try {
         const status = await apiCall('/status');
         if (status.model_loaded) {
-            statusText.textContent = `Bereit (${status.current_model})`;
+            updateModelStatus('text', null, status.current_model);
         } else {
-            statusText.textContent = 'Kein Modell geladen';
+            updateModelStatus('text', 'Kein Modell geladen');
         }
     } catch (error) {
         console.error('Fehler beim Laden des Status:', error);
@@ -299,18 +737,33 @@ function renderConversations(conversations) {
         return;
     }
     
-    conversationsList.innerHTML = conversations.map(conv => `
-        <div class="conversation-item ${conv.id === currentConversationId ? 'active' : ''}" 
+    // Speichere aktuelle Scroll-Position
+    const scrollTop = conversationsList.scrollTop;
+    
+    conversationsList.innerHTML = conversations.map(conv => {
+        const modelBadge = conv.model_id ? `<span class="conversation-model-badge">${escapeHtml(conv.model_id)}</span>` : '';
+        const conversationType = conv.conversation_type || "chat";
+        const typeIcon = conversationType === "image" ? "🖼️ " : "";
+        return `
+        <div class="conversation-item ${conv.id === currentConversationId ? 'active' : ''} ${conversationType === 'image' ? 'conversation-type-image' : ''}" 
              data-id="${conv.id}">
-            <span class="conversation-title">${escapeHtml(conv.title)}</span>
+            <div class="conversation-content">
+                <span class="conversation-title">${typeIcon}${escapeHtml(conv.title)}</span>
+                ${modelBadge}
+            </div>
             <button class="conversation-delete" onclick="deleteConversation('${conv.id}', event)">×</button>
         </div>
-    `).join('');
+    `;
+    }).join('');
+    
+    // Restore scroll position
+    conversationsList.scrollTop = scrollTop;
     
     // Add click listeners
     conversationsList.querySelectorAll('.conversation-item').forEach(item => {
         item.addEventListener('click', (e) => {
             if (!e.target.classList.contains('conversation-delete')) {
+                // Erlaube Wechsel auch während laufender Operationen
                 loadConversation(item.dataset.id);
             }
         });
@@ -326,7 +779,12 @@ async function loadConversation(conversationId) {
         // Clear and render messages
         chatMessages.innerHTML = '';
         conversation.messages.forEach(msg => {
-            addMessageToChat(msg.role, msg.content);
+            // Prüfe ob Message ein Bild ist
+            if (msg.content === "image" && msg.image_base64) {
+                addImageToChat(msg.prompt || "Generiertes Bild", `data:image/png;base64,${msg.image_base64}`);
+            } else {
+                addMessageToChat(msg.role, msg.content);
+            }
         });
         
         // Scroll to bottom
@@ -337,6 +795,40 @@ async function loadConversation(conversationId) {
             item.classList.toggle('active', item.dataset.id === conversationId);
         });
         
+        // Zeige entsprechendes Interface basierend auf conversation_type
+        const conversationType = conversation.conversation_type || "chat";
+        if (conversationType === "image") {
+            chatInputContainer.style.display = 'none';
+            imageInputContainer.style.display = 'block';
+        } else {
+            chatInputContainer.style.display = 'block';
+            imageInputContainer.style.display = 'none';
+            // Reset Button-Status beim Wechseln zu einer Chat-Conversation
+            btnSend.style.display = 'block';
+            btnCancel.style.display = 'none';
+            btnSend.disabled = messageInput.value.trim() === '';
+            messageInput.disabled = false;
+        }
+        
+        // Lade Conversation-Modell
+        const modelId = conversation.model_id || '';
+        if (conversationModelSelect) {
+            conversationModelSelect.value = modelId;
+        }
+        
+        // Lade Agent-Modus Status
+        if (conversationType === "chat") {
+            await loadAgentMode();
+        } else {
+            // Agent-Modus nur für Chat-Conversations
+            updateAgentModeButton(false);
+        }
+        
+        // Setze AbortController zurück, wenn zu anderer Conversation gewechselt wurde
+        if (currentAbortController) {
+            currentAbortController = null;
+        }
+        
         loadConversations(); // Refresh list
     } catch (error) {
         console.error('Fehler beim Laden der Conversation:', error);
@@ -344,16 +836,82 @@ async function loadConversation(conversationId) {
     }
 }
 
+async function setConversationModel(conversationId, modelId) {
+    try {
+        await apiCall(`/conversations/${conversationId}/model`, {
+            method: 'POST',
+            body: JSON.stringify({ model_id: modelId })
+        });
+        console.log(`Modell für Conversation ${conversationId} gesetzt: ${modelId || 'Global'}`);
+    } catch (error) {
+        console.error('Fehler beim Setzen des Conversation-Modells:', error);
+        alert('Fehler beim Setzen des Modells: ' + error.message);
+        // Revert selection
+        const conversation = await apiCall(`/conversations/${conversationId}`);
+        const modelId = conversation.model_id || '';
+        if (conversationModelSelect) {
+            conversationModelSelect.value = modelId;
+        }
+    }
+}
+
 async function createNewConversation() {
     try {
-        const data = await apiCall('/conversations', { method: 'POST' });
-        currentConversationId = data.conversation_id;
+        // Setze UI sofort (optimistic update)
         chatTitle.textContent = 'Neues Gespräch';
         chatMessages.innerHTML = '<div class="welcome-message"><h3>Neues Gespräch</h3><p>Stellen Sie eine Frage oder starten Sie ein Gespräch.</p></div>';
+        
+        // Zeige Chat-Interface
+        chatInputContainer.style.display = 'block';
+        imageInputContainer.style.display = 'none';
+        
+        // Reset Conversation-Modell-Auswahl
+        if (conversationModelSelect) {
+            conversationModelSelect.value = '';
+        }
+        
+        // Reset UI-Elemente
+        messageInput.disabled = false;
+        btnSend.disabled = messageInput.value.trim() === '';
+        btnSend.style.display = 'block';
+        btnCancel.style.display = 'none';
+        
+        // Erstelle Conversation im Hintergrund
+        const data = await apiCall('/conversations', { method: 'POST' });
+        currentConversationId = data.conversation_id;
+        
         loadConversations();
     } catch (error) {
         console.error('Fehler beim Erstellen der Conversation:', error);
         alert('Fehler beim Erstellen der Conversation: ' + error.message);
+    }
+}
+
+async function createNewImageConversation() {
+    try {
+        // Setze UI sofort (optimistic update)
+        chatTitle.textContent = 'Neues Bild';
+        chatMessages.innerHTML = '<div class="welcome-message"><h3>Neues Bild</h3><p>Beschreiben Sie das Bild, das Sie generieren möchten.</p></div>';
+        
+        // Zeige Image-Interface, verstecke Chat-Interface
+        chatInputContainer.style.display = 'none';
+        imageInputContainer.style.display = 'block';
+        
+        // Reset Image-Input
+        imagePromptInput.value = '';
+        imagePromptInput.disabled = false;
+        btnGenerateImage.disabled = true;
+        btnGenerateImage.style.display = 'block';
+        btnCancelImage.style.display = 'none';
+        
+        // Erstelle Image-Conversation im Hintergrund
+        const data = await apiCall('/conversations/image', { method: 'POST' });
+        currentConversationId = data.conversation_id;
+        
+        loadConversations();
+    } catch (error) {
+        console.error('Fehler beim Erstellen der Bild-Conversation:', error);
+        alert('Fehler beim Erstellen der Bild-Conversation: ' + error.message);
     }
 }
 
@@ -362,7 +920,15 @@ async function deleteConversation(conversationId, event) {
     if (!confirm('Gespräch wirklich löschen?')) return;
     
     try {
+        // Lösche sofort aus UI (optimistic update)
+        const item = document.querySelector(`.conversation-item[data-id="${conversationId}"]`);
+        if (item) {
+            item.style.opacity = '0.5';
+            item.style.pointerEvents = 'none';
+        }
+        
         await apiCall(`/conversations/${conversationId}`, { method: 'DELETE' });
+        
         if (conversationId === currentConversationId) {
             createNewConversation();
         }
@@ -370,12 +936,32 @@ async function deleteConversation(conversationId, event) {
     } catch (error) {
         console.error('Fehler beim Löschen:', error);
         alert('Fehler beim Löschen: ' + error.message);
+        // Restore UI
+        const item = document.querySelector(`.conversation-item[data-id="${conversationId}"]`);
+        if (item) {
+            item.style.opacity = '1';
+            item.style.pointerEvents = 'auto';
+        }
+        loadConversations();
     }
 }
 
 async function sendMessage() {
     const message = messageInput.value.trim();
     if (!message && uploadedFilesList.length === 0) return;
+    
+    // Prüfe ob wir in einer chat-Conversation sind
+    if (currentConversationId) {
+        const conversation = await apiCall(`/conversations/${currentConversationId}`);
+        const conversationType = conversation.conversation_type || "chat";
+        if (conversationType !== "chat") {
+            alert('Diese Funktion ist nur für Chat-Conversations verfügbar!');
+            return;
+        }
+    }
+    
+    // Speichere aktuelle Conversation-ID (kann sich während der Operation ändern)
+    const conversationIdAtStart = currentConversationId;
     
     // Prepare message with file context
     let fullMessage = message;
@@ -409,16 +995,67 @@ async function sendMessage() {
     const loadingId = addMessageToChat('assistant', 'Denkt nach...', true);
     
     try {
-        const response = await apiCall('/chat', {
-            method: 'POST',
-            body: JSON.stringify({
-                message: fullMessage,
-                conversation_id: currentConversationId,
-                max_length: settings.maxLength,
-                temperature: settings.temperature
-            }),
-            signal: currentAbortController.signal
-        });
+        let response;
+        let retries = 0;
+        const maxRetries = 3;
+        
+        // Streaming IMMER aktivieren für Satz-für-Satz Anzeige
+        try {
+            await sendMessageStream(fullMessage, conversationIdAtStart, loadingId);
+            return; // Streaming beendet, keine weitere Verarbeitung nötig
+        } catch (error) {
+            // Bei Fehler, fallback auf normale Methode
+            console.warn('Streaming fehlgeschlagen, verwende normale Methode:', error);
+        }
+        
+        while (retries < maxRetries) {
+            try {
+                response = await apiCall('/chat', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        message: fullMessage,
+                        conversation_id: conversationIdAtStart,
+                        max_length: settings.maxLength,
+                        temperature: settings.temperature
+                    }),
+                    signal: currentAbortController.signal
+                });
+                break; // Erfolgreich - verlasse Schleife
+            } catch (error) {
+                // Prüfe ob es ein ModelLoading-Fehler ist
+                if (error.name === "ModelLoading" || (error.detail && error.detail.status === "model_loading")) {
+                    const modelId = error.detail?.model_id || error.detail?.detail?.model_id;
+                    if (modelId) {
+                        // Zeige Lade-Status
+                        const loadingMsg = document.getElementById(loadingId);
+                        if (loadingMsg) {
+                            loadingMsg.querySelector('.message-content').textContent = `Lade Modell ${modelId}...`;
+                        }
+                        
+                        // Warte auf Modell-Laden
+                        await waitForModelLoad("text", modelId, conversationIdAtStart);
+                        
+                        // Wiederhole Request
+                        retries++;
+                        continue;
+                    }
+                }
+                // Anderer Fehler - weiterwerfen
+                throw error;
+            }
+        }
+        
+        if (!response) {
+            throw new Error("Maximale Anzahl von Wiederholungen erreicht");
+        }
+        
+        // Prüfe ob User zu einer anderen Conversation gewechselt hat
+        if (currentConversationId !== conversationIdAtStart) {
+            // User hat gewechselt - füge Nachricht zur ursprünglichen Conversation hinzu
+            // (wird beim nächsten Laden angezeigt)
+            console.log('User hat zu anderer Conversation gewechselt während der Generierung');
+            return;
+        }
         
         // Update conversation ID if new
         if (response.conversation_id !== currentConversationId) {
@@ -439,6 +1076,18 @@ async function sendMessage() {
         }
         
     } catch (error) {
+        // Prüfe ob User zu einer anderen Conversation gewechselt hat
+        if (currentConversationId !== conversationIdAtStart) {
+            console.log('User hat zu anderer Conversation gewechselt während der Generierung');
+            // Button trotzdem zurücksetzen, auch wenn Conversation gewechselt wurde
+            btnSend.style.display = 'block';
+            btnCancel.style.display = 'none';
+            btnSend.disabled = messageInput.value.trim() === '';
+            messageInput.disabled = false;
+            currentAbortController = null;
+            return;
+        }
+        
         // Check if it was aborted
         if (error.name === 'AbortError') {
             const loadingMsg = document.getElementById(loadingId);
@@ -456,19 +1105,34 @@ async function sendMessage() {
             console.error('Fehler beim Senden:', error);
         }
     } finally {
-        // Reset UI
-        btnSend.style.display = 'block';
-        btnCancel.style.display = 'none';
-        btnSend.disabled = messageInput.value.trim() === '';
-        messageInput.disabled = false;
-        currentAbortController = null;
+        // Reset UI - IMMER ausführen, auch bei frühen Returns
+        // Setze Button IMMER zurück, wenn wir noch in derselben Conversation sind
+        // Wenn User zu anderer Conversation gewechselt hat, wird Button in loadConversation zurückgesetzt
+        const userSwitchedConversation = conversationIdAtStart !== null && 
+                                         currentConversationId !== null && 
+                                         currentConversationId !== conversationIdAtStart;
+        
+        if (!userSwitchedConversation) {
+            // User hat nicht gewechselt - setze Button zurück
+            btnSend.style.display = 'block';
+            btnCancel.style.display = 'none';
+            btnSend.disabled = messageInput.value.trim() === '';
+            messageInput.disabled = false;
+            currentAbortController = null;
+        } else {
+            // User hat gewechselt - Button wird in loadConversation zurückgesetzt
+            // Setze nur AbortController zurück
+            currentAbortController = null;
+        }
     }
 }
 
 function cancelGeneration() {
     if (currentAbortController) {
         currentAbortController.abort();
-        statusText.textContent = 'Abgebrochen';
+        updateModelStatus('text', 'Abgebrochen');
+        // Button wird im finally Block von sendMessage zurückgesetzt
+        // Der AbortController wird im finally Block auf null gesetzt
     }
 }
 
@@ -476,12 +1140,14 @@ async function generateImage() {
     const prompt = imagePromptInput.value.trim();
     if (!prompt) return;
     
-    // Prüfe ob ein Bildmodell ausgewählt ist
-    const selectedModelId = imageModelSelect.value;
-    if (!selectedModelId) {
-        alert('Bitte wählen Sie zuerst ein Bildgenerierungsmodell aus!');
+    // Prüfe ob wir in einer image-Conversation sind
+    if (!currentConversationId) {
+        alert('Bitte erstellen Sie zuerst eine Bild-Conversation!');
         return;
     }
+    
+    // Modellauswahl erfolgt automatisch über Model-Service
+    // Keine manuelle Modellauswahl mehr nötig
     
     // Disable input
     imagePromptInput.disabled = true;
@@ -493,25 +1159,130 @@ async function generateImage() {
     
     // Show loading message
     const loadingId = addMessageToChat('assistant', 'Generiere Bild...', true);
-    statusText.textContent = 'Generiere Bild...';
+    updateModelStatus('image', 'Generiere Bild...');
+    
+    // Deklariere Variablen einmal am Anfang
+    let loadingMsg = document.getElementById(loadingId);
+    let progressBar = null;
+    let progressText = null;
+    let progressInterval = null;
     
     try {
-        const response = await apiCall('/image/generate', {
-            method: 'POST',
-            body: JSON.stringify({
-                prompt: prompt,
-                negative_prompt: "",
-                num_inference_steps: 20,
-                guidance_scale: 7.5,
-                width: 1024,
-                height: 1024,
-                model_id: selectedModelId  // Verwende ausgewähltes Modell
-            }),
-            signal: currentImageAbortController.signal
-        });
+        let response;
+        let retries = 0;
+        const maxRetries = 3;
+        
+        // Entweder-Oder: Ratio ODER Custom Size
+        const requestBody = {
+            prompt: prompt,
+            negative_prompt: "",
+            num_inference_steps: 20,
+            guidance_scale: 7.5,
+            // model_id wird automatisch vom Model-Service verwendet
+            conversation_id: currentConversationId
+        };
+        
+        if (imageSizeModeRatio && imageSizeModeRatio.checked) {
+            // Ratio-Modus: verwende aspect_ratio mit Preset-Präfix
+            const preset = imageResolutionPreset.value;
+            const ratio = imageAspectRatio.value;
+            
+            if (ratio === 'custom' && customRatioW && customRatioH) {
+                const w = parseFloat(customRatioW.value);
+                const h = parseFloat(customRatioH.value);
+                if (w && h && w > 0 && h > 0) {
+                    // Format: "preset:custom:W:H"
+                    requestBody.aspect_ratio = `${preset}:custom:${w}:${h}`;
+                }
+            } else if (ratio) {
+                // Format: "preset:ratio" z.B. "l:16:9"
+                requestBody.aspect_ratio = `${preset}:${ratio}`;
+            }
+            
+            // Backend wird Dimensionen aus Ratio + Preset berechnen
+        } else {
+            // Custom Size-Modus: verwende width/height
+            const width = parseInt(imageWidth.value) || 1024;
+            const height = parseInt(imageHeight.value) || 1024;
+            requestBody.width = width;
+            requestBody.height = height;
+        }
+        
+        // Erstelle Fortschrittsanzeige (nach requestBody Definition)
+        loadingMsg = document.getElementById(loadingId);
+        if (loadingMsg) {
+            const contentDiv = loadingMsg.querySelector('.message-content');
+            if (contentDiv) {
+                contentDiv.innerHTML = `
+                    <div>Generiere Bild...</div>
+                    <div class="model-loading-progress">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="image-progress-bar-${loadingId}"></div>
+                        </div>
+                        <div class="progress-text" id="image-progress-text-${loadingId}">0%</div>
+                    </div>
+                `;
+                progressBar = document.getElementById(`image-progress-bar-${loadingId}`);
+                progressText = document.getElementById(`image-progress-text-${loadingId}`);
+            }
+        }
+        
+        // Starte Fortschritts-Simulation (da wir keine echten Updates vom Backend bekommen)
+        const numSteps = requestBody.num_inference_steps || 20;
+        let currentStep = 0;
+        if (progressBar && progressText) {
+            progressInterval = setInterval(() => {
+                currentStep++;
+                const progress = Math.min((currentStep / numSteps) * 100, 95); // Max 95% bis fertig
+                progressBar.style.width = `${progress}%`;
+                progressText.textContent = `${Math.round(progress)}% (${currentStep}/${numSteps} Schritte)`;
+            }, 1000); // Update alle Sekunde
+        }
+        
+        while (retries < maxRetries) {
+            try {
+                
+                response = await apiCall('/image/generate', {
+                    method: 'POST',
+                    body: JSON.stringify(requestBody),
+                    signal: currentImageAbortController.signal
+                });
+                break; // Erfolgreich - verlasse Schleife
+            } catch (error) {
+                // Prüfe ob es ein ModelLoading-Fehler ist
+                if (error.name === "ModelLoading" || (error.detail && error.detail.status === "model_loading")) {
+                    const modelId = error.detail?.model_id || error.detail?.detail?.model_id;
+                    if (modelId) {
+                        // Zeige Lade-Status
+                        loadingMsg = document.getElementById(loadingId);
+                        if (loadingMsg) {
+                            loadingMsg.querySelector('.message-content').textContent = `Lade Bildmodell ${modelId}...`;
+                        }
+                        
+                        // Warte auf Modell-Laden
+                        await waitForModelLoad("image", modelId, currentConversationId);
+                        
+                        // Wiederhole Request
+                        retries++;
+                        continue;
+                    }
+                }
+                // Anderer Fehler - weiterwerfen
+                throw error;
+            }
+        }
+        
+        if (!response) {
+            throw new Error("Maximale Anzahl von Wiederholungen erreicht");
+        }
+        
+        // Stoppe Fortschritts-Simulation
+        if (progressInterval) {
+            clearInterval(progressInterval);
+        }
         
         // Remove loading message
-        const loadingMsg = document.getElementById(loadingId);
+        loadingMsg = document.getElementById(loadingId);
         if (loadingMsg) {
             loadingMsg.remove();
         }
@@ -520,24 +1291,71 @@ async function generateImage() {
         const imageUrl = `data:image/png;base64,${response.image_base64}`;
         addImageToChat(prompt, imageUrl);
         
-        statusText.textContent = 'Bild generiert';
+        // Zeige GPU-Status-Informationen falls vorhanden
+        if (response.auto_resized || response.cpu_offload_used) {
+            let statusMsg = 'Bild generiert';
+            if (response.auto_resized) {
+                statusMsg += ` (Größe automatisch angepasst: ${response.width}x${response.height})`;
+            }
+            if (response.cpu_offload_used) {
+                statusMsg += ' [CPU-Offload aktiviert]';
+            }
+            updateModelStatus('image', statusMsg);
+            
+            // Zeige Info-Meldung
+            const infoMsg = document.createElement('div');
+            infoMsg.className = 'message assistant';
+            infoMsg.style.marginTop = '10px';
+            infoMsg.style.padding = '10px';
+            infoMsg.style.background = 'var(--bg-tertiary)';
+            infoMsg.style.borderRadius = '8px';
+            infoMsg.style.fontSize = '0.9em';
+            let infoText = '';
+            if (response.auto_resized) {
+                infoText += `⚠️ Bildgröße wurde automatisch auf ${response.width}x${response.height} reduziert (GPU-Speicher). `;
+            }
+            if (response.cpu_offload_used) {
+                infoText += 'ℹ️ CPU-Offload wurde verwendet, um GPU-Speicher zu sparen.';
+            }
+            infoMsg.textContent = infoText;
+            const chatMessages = document.getElementById('chatMessages');
+            if (chatMessages) {
+                chatMessages.appendChild(infoMsg);
+            }
+        } else {
+            updateModelStatus('image', 'Bild generiert');
+        }
+        
+        // Clear input
+        imagePromptInput.value = '';
+        btnGenerateImage.disabled = true;
+        
+        // Reload conversation to show saved image
+        if (currentConversationId) {
+            loadConversation(currentConversationId);
+        }
         
     } catch (error) {
+        // Stoppe Fortschritts-Simulation
+        if (progressInterval) {
+            clearInterval(progressInterval);
+        }
+        
         if (error.name === 'AbortError') {
-            const loadingMsg = document.getElementById(loadingId);
+            loadingMsg = document.getElementById(loadingId);
             if (loadingMsg) {
                 loadingMsg.remove();
             }
             addMessageToChat('assistant', 'Bildgenerierung abgebrochen.');
-            statusText.textContent = 'Abgebrochen';
+            updateModelStatus('image', 'Abgebrochen');
         } else {
-            const loadingMsg = document.getElementById(loadingId);
+            loadingMsg = document.getElementById(loadingId);
             if (loadingMsg) {
                 loadingMsg.remove();
             }
             addMessageToChat('assistant', 'Fehler: ' + error.message);
             console.error('Fehler bei Bildgenerierung:', error);
-            statusText.textContent = 'Fehler';
+            updateModelStatus('image', 'Fehler');
         }
     } finally {
         // Reset UI
@@ -552,7 +1370,7 @@ async function generateImage() {
 function cancelImageGeneration() {
     if (currentImageAbortController) {
         currentImageAbortController.abort();
-        statusText.textContent = 'Abgebrochen';
+        updateModelStatus('image', 'Abgebrochen');
     }
 }
 
@@ -632,6 +1450,46 @@ function addMessageToChat(role, content, isLoading = false, files = []) {
     return messageId;
 }
 
+async function applyPerformanceSettings() {
+    try {
+        const cpuThreads = parseInt(cpuThreadsSlider.value);
+        const gpuOptimization = gpuOptimizationSelect.value;
+        const disableOffload = disableCpuOffload.checked;
+        
+        await apiCall('/performance/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                cpu_threads: cpuThreads === 0 ? null : cpuThreads,
+                gpu_optimization: gpuOptimization,
+                disable_cpu_offload: disableOffload
+            })
+        });
+        
+        alert('Performance-Einstellungen wurden gespeichert. Sie werden beim nächsten Modell-Laden wirksam.');
+    } catch (error) {
+        console.error('Fehler beim Anwenden der Performance-Einstellungen:', error);
+        alert('Fehler: ' + error.message);
+    }
+}
+
+async function loadPerformanceSettings() {
+    try {
+        const data = await apiCall('/performance/settings');
+        if (data.cpu_threads !== undefined) {
+            cpuThreadsSlider.value = data.cpu_threads || 0;
+            cpuThreadsValue.textContent = data.cpu_threads === 0 || !data.cpu_threads ? 'Auto' : data.cpu_threads;
+        }
+        if (data.gpu_optimization) {
+            gpuOptimizationSelect.value = data.gpu_optimization;
+        }
+        if (data.disable_cpu_offload !== undefined) {
+            disableCpuOffload.checked = data.disable_cpu_offload;
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der Performance-Einstellungen:', error);
+    }
+}
+
 async function loadPreferences() {
     try {
         const prefs = await apiCall('/preferences');
@@ -664,6 +1522,90 @@ async function resetPreferences() {
     }
 }
 
+// Audio-Einstellungen
+async function loadAudioSettings() {
+    try {
+        const data = await apiCall('/audio/settings');
+        if (data.transcription_language !== undefined) {
+            settings.transcriptionLanguage = data.transcription_language || "";
+            const transcriptionLanguageSelect = document.getElementById('transcriptionLanguageSelect');
+            if (transcriptionLanguageSelect) {
+                transcriptionLanguageSelect.value = settings.transcriptionLanguage;
+            }
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der Audio-Einstellungen:', error);
+    }
+}
+
+async function saveAudioSettings() {
+    try {
+        await apiCall('/audio/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                transcription_language: settings.transcriptionLanguage || ""
+            })
+        });
+    } catch (error) {
+        console.error('Fehler beim Speichern der Audio-Einstellungen:', error);
+    }
+}
+
+// Agent-Modus Funktionen
+async function toggleAgentMode() {
+    if (!currentConversationId) {
+        alert('Bitte wählen Sie zuerst eine Conversation aus');
+        return;
+    }
+    
+    try {
+        // Hole aktuellen Status
+        const currentStatus = await loadAgentMode();
+        const newStatus = !currentStatus;
+        
+        // Setze neuen Status
+        const response = await apiCall(`/conversations/${currentConversationId}/agent-mode`, {
+            method: 'POST',
+            body: JSON.stringify({ enabled: newStatus })
+        });
+        
+        // Update Button
+        updateAgentModeButton(newStatus);
+    } catch (error) {
+        console.error('Fehler beim Toggle Agent-Modus:', error);
+        alert('Fehler beim Ändern des Agent-Modus: ' + error.message);
+    }
+}
+
+async function loadAgentMode() {
+    if (!currentConversationId) {
+        return false;
+    }
+    
+    try {
+        const response = await apiCall(`/conversations/${currentConversationId}/agent-mode`);
+        const agentMode = response.agent_mode || false;
+        updateAgentModeButton(agentMode);
+        return agentMode;
+    } catch (error) {
+        console.error('Fehler beim Laden des Agent-Modus:', error);
+        updateAgentModeButton(false);
+        return false;
+    }
+}
+
+function updateAgentModeButton(enabled) {
+    if (!btnAgentMode) return;
+    
+    if (enabled) {
+        btnAgentMode.classList.add('active');
+        btnAgentMode.title = 'Agent-Modus aktiviert (WebSearch & Dateimanipulation)';
+    } else {
+        btnAgentMode.classList.remove('active');
+        btnAgentMode.title = 'Agent-Modus deaktiviert - Klicken zum Aktivieren';
+    }
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -677,6 +1619,11 @@ let lastStats = {
     ram: null,
     gpu: null
 };
+let statsBackoffDelay = 2000; // Start mit 2 Sekunden
+let statsConsecutiveErrors = 0;
+let statsPaused = false;
+const MAX_BACKOFF_DELAY = 30000; // Maximal 30 Sekunden
+const MAX_CONSECUTIVE_ERRORS = 5; // Nach 5 Fehlern pausieren
 
 function startSystemStatsUpdate() {
     // Prüfe ob Elemente existieren
@@ -691,8 +1638,31 @@ function startSystemStatsUpdate() {
     
     console.log('Starte System-Stats Update');
     updateSystemStats();
-    // Aktualisiere alle 2 Sekunden
-    statsUpdateInterval = setInterval(updateSystemStats, 2000);
+    // Starte Polling mit variablem Intervall
+    scheduleNextStatsUpdate();
+}
+
+function scheduleNextStatsUpdate() {
+    if (statsUpdateInterval) {
+        clearInterval(statsUpdateInterval);
+    }
+    
+    if (statsPaused) {
+        // Versuche alle 10 Sekunden wieder zu verbinden
+        statsUpdateInterval = setTimeout(() => {
+            statsPaused = false;
+            statsConsecutiveErrors = 0;
+            statsBackoffDelay = 2000;
+            updateSystemStats();
+            scheduleNextStatsUpdate();
+        }, 10000);
+        return;
+    }
+    
+    statsUpdateInterval = setTimeout(() => {
+        updateSystemStats();
+        scheduleNextStatsUpdate();
+    }, statsBackoffDelay);
 }
 
 async function updateSystemStats() {
@@ -701,10 +1671,15 @@ async function updateSystemStats() {
         
         if (!stats) {
             console.warn('Keine Stats-Daten erhalten');
+            statsConsecutiveErrors++;
+            handleStatsError();
             return;
         }
         
-        console.log('System-Stats erhalten:', stats);
+        // Erfolgreich - Reset Backoff
+        statsConsecutiveErrors = 0;
+        statsBackoffDelay = 2000; // Zurück zu normalem Intervall
+        statsPaused = false;
         
         // CPU
         if (stats.cpu_percent !== null && stats.cpu_percent !== undefined) {
@@ -745,12 +1720,46 @@ async function updateSystemStats() {
             }
         }
     } catch (error) {
+        statsConsecutiveErrors++;
+        handleStatsError(error);
+    }
+}
+
+function handleStatsError(error = null) {
+    const isNetworkError = error && (
+        error.message && (
+            error.message.includes('fetch') || 
+            error.message.includes('Netzwerkfehler') || 
+            error.message.includes('CONNECTION_REFUSED')
+        )
+    );
+    
+    // Exponential Backoff
+    if (statsConsecutiveErrors > 0) {
+        statsBackoffDelay = Math.min(
+            statsBackoffDelay * 1.5,
+            MAX_BACKOFF_DELAY
+        );
+    }
+    
+    // Pausiere nach zu vielen Fehlern
+    if (statsConsecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        statsPaused = true;
+        // Zeige visuelles Feedback (optional - kann entfernt werden wenn störend)
+        if (cpuPercent && lastStats.cpu !== null) {
+            cpuPercent.textContent = lastStats.cpu + '%';
+        }
+    }
+    
+    // Werte NICHT zurücksetzen - letzte Werte beibehalten
+    // Nur wenn noch keine Werte vorhanden sind, "-" anzeigen
+    if (cpuPercent && lastStats.cpu === null) cpuPercent.textContent = '-';
+    if (ramPercent && lastStats.ram === null) ramPercent.textContent = '-';
+    if (gpuPercent && lastStats.gpu === null) gpuPercent.textContent = '-';
+    
+    // Logge nur nicht-Netzwerkfehler
+    if (error && !isNetworkError) {
         console.error('Fehler beim Abrufen der System-Stats:', error);
-        // Werte NICHT zurücksetzen - letzte Werte beibehalten
-        // Nur wenn noch keine Werte vorhanden sind, "-" anzeigen
-        if (cpuPercent && lastStats.cpu === null) cpuPercent.textContent = '-';
-        if (ramPercent && lastStats.ram === null) ramPercent.textContent = '-';
-        if (gpuPercent && lastStats.gpu === null) gpuPercent.textContent = '-';
     }
 }
 
@@ -908,8 +1917,7 @@ function removeFile(index) {
     }
 }
 
-// Auto-refresh status every 60 seconds (reduced frequency to avoid log spam)
-setInterval(loadStatus, 60000);
+// Kein automatisches Polling mehr - Status wird nur bei Bedarf aktualisiert
 
 // Audio Recording
 let mediaRecorder = null;
@@ -917,6 +1925,7 @@ let audioChunks = [];
 let isRecording = false;
 
 async function toggleMicrophone() {
+    console.log('toggleMicrophone aufgerufen, isRecording:', isRecording);
     if (!isRecording) {
         await startRecording();
     } else {
@@ -977,7 +1986,7 @@ function stopRecording() {
         isRecording = false;
         btnMicrophone.classList.remove('recording');
         btnMicrophone.textContent = '🎤';
-        statusText.textContent = 'Verarbeite Aufnahme...';
+        updateModelStatus('audio', 'Verarbeite Aufnahme...');
     }
 }
 
@@ -993,16 +2002,62 @@ async function processAudioRecording() {
         const formData = new FormData();
         formData.append('file', wavBlob, 'recording.wav');
         
-        statusText.textContent = 'Transkribiere...';
+        // Hole gespeicherte Sprache aus Einstellungen
+        const language = settings.transcriptionLanguage || "";
         
-        const response = await fetch(`${API_BASE}/audio/transcribe`, {
-            method: 'POST',
-            body: formData
-        });
+        // Baue URL mit optionalem language-Parameter
+        let transcribeUrl = `${API_BASE}/audio/transcribe`;
+        if (language) {
+            transcribeUrl += `?language=${encodeURIComponent(language)}`;
+        }
         
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Transkriptions-Fehler');
+        updateModelStatus('audio', 'Transkribiere...');
+        
+        let response;
+        let retries = 0;
+        const maxRetries = 3;
+        
+        while (retries < maxRetries) {
+            try {
+                response = await fetch(transcribeUrl, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                // Prüfe ob es ein "model_loading" Status ist (202 Accepted)
+                if (response.status === 202) {
+                    const errorData = await response.json();
+                    if (errorData.detail && errorData.detail.status === "model_loading") {
+                        const modelId = errorData.detail.model_id;
+                        updateModelStatus('audio', `Lade Modell ${modelId}...`);
+                        // Warte auf Modell-Laden
+                        await waitForModelLoad("audio", modelId);
+                        // Wiederhole Request
+                        retries++;
+                        continue;
+                    }
+                }
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Transkriptions-Fehler');
+                }
+                
+                // Erfolgreich - verlasse Schleife
+                break;
+            } catch (error) {
+                // Bei ModelLoading-Fehler, wiederhole
+                if (error.name === "ModelLoading" || (error.detail && error.detail.status === "model_loading")) {
+                    retries++;
+                    continue;
+                }
+                // Anderer Fehler - weiterwerfen
+                throw error;
+            }
+        }
+        
+        if (!response || !response.ok) {
+            throw new Error("Maximale Anzahl von Wiederholungen erreicht oder Transkription fehlgeschlagen");
         }
         
         const data = await response.json();
@@ -1012,17 +2067,17 @@ async function processAudioRecording() {
         btnSend.disabled = false;
         autoResizeTextarea();
         
-        statusText.textContent = 'Transkription erfolgreich';
+        updateModelStatus('audio', 'Transkription erfolgreich');
         setTimeout(() => {
-            statusText.textContent = 'Bereit';
+            updateModelStatus('audio', null);
         }, 2000);
         
     } catch (error) {
         console.error('Fehler bei der Transkription:', error);
         alert('Fehler bei der Transkription: ' + error.message);
-        statusText.textContent = 'Fehler';
+        updateModelStatus('audio', 'Fehler');
         setTimeout(() => {
-            statusText.textContent = 'Bereit';
+            updateModelStatus('audio', null);
         }, 2000);
     }
 }
@@ -1086,4 +2141,267 @@ function audioBufferToWav(buffer) {
     
     return arrayBuffer;
 }
+
+// Update-Queue für DOM-Updates (verhindert UI-Blockierung)
+class UpdateQueue {
+    constructor() {
+        this.pending = new Map();
+        this.rafId = null;
+    }
+    
+    schedule(key, updateFn) {
+        this.pending.set(key, updateFn);
+        if (!this.rafId) {
+            this.rafId = requestAnimationFrame(() => this.flush());
+        }
+    }
+    
+    flush() {
+        this.pending.forEach(fn => fn());
+        this.pending.clear();
+        this.rafId = null;
+    }
+}
+
+// Scroll-Throttling (verhindert zu häufige Scroll-Updates)
+let lastScrollUpdate = 0;
+const SCROLL_THROTTLE_MS = 100;
+
+function scheduleScrollUpdate() {
+    const now = Date.now();
+    if (now - lastScrollUpdate >= SCROLL_THROTTLE_MS) {
+        if (chatMessages) {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        lastScrollUpdate = now;
+    }
+}
+
+// Streaming Chat-Funktion
+async function sendMessageStream(message, conversationId, loadingId) {
+    try {
+        const response = await fetch(`${API_BASE}/chat/stream`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                message: message,
+                conversation_id: conversationId,
+                max_length: settings.maxLength,
+                temperature: settings.temperature
+            }),
+            signal: currentAbortController?.signal
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        // Entferne Loading-Message
+        const loadingMsg = document.getElementById(loadingId);
+        if (loadingMsg) {
+            loadingMsg.remove();
+        }
+        
+        // Erstelle neue Message für Streaming
+        const messageId = 'msg-' + Date.now();
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant';
+        messageDiv.id = messageId;
+        
+        const avatar = 'AI';
+        const timestamp = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        
+        messageDiv.innerHTML = `
+            <div class="message-avatar">${avatar}</div>
+            <div class="message-content">
+                <span id="streaming-content-${messageId}"></span>
+                <div id="streaming-progress-${messageId}" class="streaming-progress" style="display: none;">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="progress-bar-${messageId}"></div>
+                    </div>
+                    <div class="progress-text" id="progress-text-${messageId}">0/0 Tokens (0%)</div>
+                </div>
+                <div class="message-timestamp">${timestamp}</div>
+            </div>
+        `;
+        
+        // Remove welcome message if exists
+        const welcomeMsg = chatMessages.querySelector('.welcome-message');
+        if (welcomeMsg) {
+            welcomeMsg.remove();
+        }
+        
+        chatMessages.appendChild(messageDiv);
+        const contentElement = document.getElementById(`streaming-content-${messageId}`);
+        const progressContainer = document.getElementById(`streaming-progress-${messageId}`);
+        const progressBar = document.getElementById(`progress-bar-${messageId}`);
+        const progressText = document.getElementById(`progress-text-${messageId}`);
+        
+        let fullResponse = '';
+        let tokenCount = 0;
+        // Stelle sicher, dass maxTokens nie 0 ist
+        const maxTokens = Math.max(settings.maxLength || 2048, 512); // Mindestens 512, damit Division funktioniert
+        
+        // Erstelle UpdateQueue für DOM-Updates
+        const updateQueue = new UpdateQueue();
+        let chunkCount = 0;
+        
+        // Lese Stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+            
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.chunk) {
+                            fullResponse += data.chunk;
+                            // Zähle Tokens grob (ungefähr 1 Token = 4 Zeichen für deutsche Texte)
+                            tokenCount = Math.ceil(fullResponse.length / 4);
+                            chunkCount++;
+                            
+                            // Content sofort aktualisieren (kritisch für Streaming-Erlebnis)
+                            if (contentElement) {
+                                contentElement.textContent = fullResponse; // Sofort, nicht gebatchet
+                            }
+                            
+                            // Zeige Fortschrittsanzeige sofort an (nicht gebatchet)
+                            if (tokenCount > 0 && progressContainer && progressBar && progressText) {
+                                // Container sofort anzeigen (nicht gebatchet)
+                                if (progressContainer.style.display === 'none' || !progressContainer.style.display) {
+                                    progressContainer.style.display = 'block';
+                                }
+                                // Nur Werte-Updates batchen (für Performance)
+                                updateQueue.schedule('progress', () => {
+                                    const progress = Math.min((tokenCount / maxTokens) * 100, 100);
+                                    progressBar.style.width = `${progress}%`;
+                                    progressText.textContent = `${tokenCount}/${maxTokens} Tokens (${Math.round(progress)}%)`;
+                                });
+                            }
+                            
+                            // Throttled Scroll-Update
+                            scheduleScrollUpdate();
+                            
+                            // Event Loop Yielding nach jedem 10. Chunk
+                            if (chunkCount % 10 === 0) {
+                                await new Promise(resolve => setTimeout(resolve, 0));
+                            }
+                        }
+                        if (data.done) {
+                            // Verstecke Fortschrittsanzeige
+                            if (progressContainer) {
+                                progressContainer.style.display = 'none';
+                            }
+                            
+                            // Antwort wird bereits vom Server gespeichert
+                            // Update title if first message
+                            if (chatTitle.textContent === 'Neues Gespräch') {
+                                const firstWords = message.substring(0, 50);
+                                chatTitle.textContent = firstWords + (message.length > 50 ? '...' : '');
+                            }
+                            return;
+                        }
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
+                    } catch (e) {
+                        // Ignoriere Parse-Fehler für unvollständige Chunks
+                        if (e.message !== 'Unexpected end of JSON input') {
+                            console.warn('Fehler beim Parsen des Stream-Chunks:', e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Verstecke Fortschrittsanzeige am Ende
+        if (progressContainer) {
+            progressContainer.style.display = 'none';
+        }
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            throw error;
+        }
+        console.error('Fehler beim Streaming:', error);
+        throw error;
+    }
+}
+
+// Server Restart
+async function restartServer() {
+    if (!confirm('Möchten Sie den Server wirklich neu starten? Dies wird einige Sekunden dauern.')) {
+        return;
+    }
+    
+    try {
+        const response = await apiCall('/restart', {
+            method: 'POST'
+        });
+        
+        // Zeige Status-Update
+        updateModelStatus('text', 'Server startet neu...');
+        updateModelStatus('audio', 'Server startet neu...');
+        updateModelStatus('image', 'Server startet neu...');
+        
+        // Warte auf Server-Neustart und aktualisiere Status
+        await waitForServerRestart();
+        
+        // Status aktualisieren
+        await loadStatus();
+        await loadModelServiceStatus();
+        
+        alert('Server wurde erfolgreich neu gestartet.');
+    } catch (error) {
+        console.error('Fehler beim Server-Restart:', error);
+        alert('Fehler beim Server-Restart: ' + error.message);
+    }
+}
+
+// Wartet auf Server-Neustart
+async function waitForServerRestart() {
+    const maxAttempts = 30; // 30 Versuche = ca. 30 Sekunden
+    const delay = 1000; // 1 Sekunde zwischen Versuchen
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            // Versuche Status-Endpoint zu erreichen mit Timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 2000);
+            
+            const response = await fetch(`${API_BASE}/status`, {
+                method: 'GET',
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+                // Server ist wieder verfügbar
+                console.log(`Server ist wieder verfügbar nach ${attempt} Versuchen`);
+                return;
+            }
+        } catch (error) {
+            // Server noch nicht verfügbar - das ist normal während Neustart
+            if (attempt % 5 === 0) { // Nur alle 5 Versuche loggen
+                console.log(`Warte auf Server... (Versuch ${attempt}/${maxAttempts})`);
+            }
+        }
+        
+        // Warte vor nächstem Versuch
+        await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    // Wenn nach maxAttempts der Server noch nicht verfügbar ist, werfe Fehler
+    throw new Error('Server ist nach dem Neustart nicht verfügbar. Bitte prüfen Sie die Server-Logs.');
+}
+
 

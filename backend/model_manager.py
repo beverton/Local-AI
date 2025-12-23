@@ -23,6 +23,9 @@ class ModelManager:
         self.tokenizer = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Verwende Device: {self.device}")
+        
+        # Lade Performance-Einstellungen
+        self._apply_performance_settings()
     
     def _load_config(self) -> Dict[str, Any]:
         """Lädt die Konfiguration aus config.json"""
@@ -32,6 +35,27 @@ class ModelManager:
         except FileNotFoundError:
             logger.error(f"Config-Datei nicht gefunden: {self.config_path}")
             return {}
+    
+    def _apply_performance_settings(self):
+        """Wendet Performance-Einstellungen an"""
+        try:
+            perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
+            if os.path.exists(perf_settings_path):
+                with open(perf_settings_path, 'r', encoding='utf-8') as f:
+                    perf_settings = json.load(f)
+                    cpu_threads = perf_settings.get("cpu_threads")
+                    if cpu_threads and cpu_threads > 0:
+                        torch.set_num_threads(cpu_threads)
+                        torch.set_num_interop_threads(cpu_threads)
+                        logger.info(f"CPU-Threads auf {cpu_threads} gesetzt")
+                    else:
+                        # Auto
+                        import os as os_module
+                        num_threads = os_module.cpu_count() or 4
+                        torch.set_num_threads(num_threads)
+                        torch.set_num_interop_threads(num_threads)
+        except Exception as e:
+            logger.warning(f"Fehler beim Anwenden der Performance-Einstellungen: {e}")
     
     def get_available_models(self) -> Dict[str, Dict[str, Any]]:
         """Gibt alle verfügbaren Modelle zurück"""
@@ -105,7 +129,7 @@ class ModelManager:
             self.tokenizer = None
             return False
     
-    def generate(self, messages: List[Dict[str, str]], max_length: int = 512, temperature: float = 0.3) -> str:
+    def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3) -> str:
         """
         Generiert eine Antwort basierend auf Messages (Chat-Format)
         
@@ -149,6 +173,35 @@ class ModelManager:
             
             # Tokenize
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            input_length = inputs['input_ids'].shape[1]
+            
+            # Modell-spezifische Limits
+            model_limits = {
+                "mistral": 4096,  # Mistral hat typischerweise 4096 Token Kontext
+                "phi-3": 8192,    # Phi-3 hat 8192 Token Kontext
+                "default": 2048   # Standard-Limit
+            }
+            
+            # Bestimme Modell-Limit
+            model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
+            model_max_context = model_limits.get(model_name, model_limits["default"])
+            
+            # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
+            max_new_tokens = min(
+                max_length - input_length,  # Verfügbarer Platz basierend auf max_length
+                model_max_context - input_length,  # Verfügbarer Platz basierend auf Modell-Limit
+                2048  # Sicherheits-Limit (verhindert zu große Generierungen)
+            )
+            
+            # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
+            if max_new_tokens <= 0:
+                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}")
+            
+            # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
+            max_new_tokens = max(1, max_new_tokens)
+            
+            # Logging für Debugging
+            logger.info(f"Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
             
             # Generate mit besseren Parametern
             with torch.no_grad():
@@ -174,13 +227,11 @@ class ModelManager:
                         except:
                             pass
                 
-                # Für Mistral: Kürzere Antworten, stärkere Kontrolle
-                max_tokens = min(max_length, 200 if is_mistral else 256)
                 repetition_penalty = 1.3 if is_mistral else 1.2
                 
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=max_tokens,
+                    max_new_tokens=max_new_tokens,
                     temperature=temperature if temperature > 0 else (0.7 if is_mistral else None),
                     do_sample=temperature > 0,
                     top_p=0.9 if temperature > 0 else None,
@@ -466,8 +517,142 @@ class ModelManager:
                 response = response.split(':', 1)[-1].strip() if ':' in response else response[9:].strip()
             
             return response
-            
+        
         except Exception as e:
             logger.error(f"Fehler bei der Generierung: {e}")
+            raise
+    
+    def generate_stream(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3):
+        """
+        Generiert eine Antwort im Streaming-Modus (Generator)
+        Verwendet TextIteratorStreamer für echtes Streaming
+        
+        Args:
+            messages: Liste von Messages im Format [{"role": "user", "content": "..."}, ...]
+            max_length: Maximale Länge der Antwort
+            temperature: Kreativität (0.0 = deterministisch, 1.0 = kreativ)
+            
+        Yields:
+            Token-Chunks als Strings
+        """
+        if not self.is_model_loaded():
+            raise RuntimeError("Kein Modell geladen!")
+        
+        try:
+            from transformers import TextIteratorStreamer
+            import threading
+            import queue
+            
+            # Verwende Chat-Template wenn verfügbar
+            if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+            else:
+                # Fallback für ältere Modelle
+                prompt_parts = []
+                for msg in messages:
+                    role = msg["role"]
+                    content = msg["content"]
+                    if role == "system":
+                        prompt_parts.append(f"System: {content}")
+                    elif role == "user":
+                        prompt_parts.append(f"User: {content}")
+                    elif role == "assistant":
+                        prompt_parts.append(f"Assistant: {content}")
+                prompt = "\n".join(prompt_parts) + "\nAssistant:"
+            
+            # Tokenize
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            input_length = inputs['input_ids'].shape[1]
+            
+            # Bestimme Modell-Typ
+            is_mistral = "mistral" in self.current_model_id.lower() if self.current_model_id else False
+            
+            # EOS-Token-IDs
+            eos_token_id = self.tokenizer.eos_token_id
+            if hasattr(self.tokenizer, 'im_end_id'):
+                eos_token_id = [self.tokenizer.eos_token_id, self.tokenizer.im_end_id]
+            elif self.current_model_id and "phi-3" in self.current_model_id.lower():
+                eos_token_id = self.tokenizer.eos_token_id
+            elif is_mistral:
+                if hasattr(self.tokenizer, 'convert_tokens_to_ids'):
+                    try:
+                        stop_tokens = ["</s>", "<|end|>", "<|endoftext|>"]
+                        stop_ids = [self.tokenizer.convert_tokens_to_ids(t) for t in stop_tokens if self.tokenizer.convert_tokens_to_ids(t) is not None]
+                        if stop_ids:
+                            eos_token_id = [eos_token_id] + stop_ids
+                    except:
+                        pass
+            
+            # Modell-spezifische Limits
+            model_limits = {
+                "mistral": 4096,  # Mistral hat typischerweise 4096 Token Kontext
+                "phi-3": 8192,    # Phi-3 hat 8192 Token Kontext
+                "default": 2048   # Standard-Limit
+            }
+            
+            # Bestimme Modell-Limit
+            model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
+            model_max_context = model_limits.get(model_name, model_limits["default"])
+            
+            # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
+            max_new_tokens = min(
+                max_length - input_length,  # Verfügbarer Platz basierend auf max_length
+                model_max_context - input_length,  # Verfügbarer Platz basierend auf Modell-Limit
+                2048  # Sicherheits-Limit (verhindert zu große Generierungen)
+            )
+            
+            # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
+            if max_new_tokens <= 0:
+                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}")
+            
+            # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
+            max_new_tokens = max(1, max_new_tokens)
+            
+            # Logging für Debugging
+            logger.info(f"Stream - Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
+            
+            repetition_penalty = 1.3 if is_mistral else 1.2
+            
+            # Erstelle Streamer
+            streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+            
+            # Generiere in separatem Thread
+            generation_kwargs = {
+                **inputs,
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature if temperature > 0 else (0.7 if is_mistral else None),
+                "do_sample": temperature > 0,
+                "top_p": 0.9 if temperature > 0 else None,
+                "top_k": 50 if temperature > 0 and is_mistral else None,
+                "repetition_penalty": repetition_penalty,
+                "pad_token_id": self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
+                "eos_token_id": eos_token_id,
+                "no_repeat_ngram_size": 3,
+                "early_stopping": True,
+                "streamer": streamer
+            }
+            
+            generation_thread = threading.Thread(
+                target=self.model.generate,
+                kwargs=generation_kwargs
+            )
+            generation_thread.start()
+            
+            # Yield Chunks vom Streamer
+            for text in streamer:
+                if text:
+                    # Bereinige Chunk
+                    cleaned = text.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
+                    if cleaned:
+                        yield cleaned
+            
+            generation_thread.join()
+            
+        except Exception as e:
+            logger.error(f"Fehler bei Streaming-Generierung: {e}")
             raise
 

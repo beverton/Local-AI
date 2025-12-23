@@ -1,0 +1,9 @@
+# Dependencies für Bildgenerierung (Flux)
+# Nur installieren wenn Sie Flux oder andere Bildgenerierungsmodelle nutzen möchten
+
+diffusers>=0.21.0
+pillow>=10.0.0
+protobuf>=4.21.0
+xformers>=0.0.23
+sentencepiece>=0.1.99
+

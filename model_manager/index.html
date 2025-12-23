@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Manager - Local AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <div class="header">
+            <h1>🔧 Model Manager</h1>
+            <div class="header-info">
+                <span id="serviceStatus" class="status-indicator">●</span>
+                <span id="serviceStatusText">Verbindung wird hergestellt...</span>
+                <button id="btnRestart" style="margin-left: 15px; padding: 8px 15px; background: #e67e22; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">🔄 Server neu starten</button>
+            </div>
+        </div>
+        
+        <div class="main-content" id="mainContent">
+            <div class="loading">Lade Modell-Status...</div>
+        </div>
+    </div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>
+

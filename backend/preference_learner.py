@@ -136,3 +136,11 @@ class PreferenceLearner:
             logger.error(f"Fehler beim Speichern der Präferenzen: {e}")
 
 
+
+
+
+
+
+
+
+

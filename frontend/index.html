@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Local AI - Ihr persönlicher AI-Assistent</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="pipeline_editor.css">
 </head>
 <body>
     <div class="app-container">
@@ -13,6 +14,8 @@
             <div class="sidebar-header">
                 <h1>Local AI</h1>
                 <button class="btn-new-chat" id="btnNewChat">+ Neues Gespräch</button>
+                <button class="btn-new-image" id="btnNewImage" style="width: 100%; margin-top: 10px; padding: 10px; background: var(--accent); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">🖼️ Neues Bild</button>
+                <button class="btn-pipeline" id="btnPipeline" style="width: 100%; margin-top: 10px; padding: 10px; background: var(--accent); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">🔗 Pipeline Editor</button>
             </div>
             
             <div class="conversations-list" id="conversationsList">
@@ -20,15 +23,40 @@
             </div>
             
             <div class="sidebar-footer">
-                <div class="model-selector">
-                    <label for="modelSelect">Modell:</label>
-                    <select id="modelSelect" class="model-select">
-                        <option value="">Lade Modelle...</option>
-                    </select>
+                <div class="model-service-status" id="modelServiceStatus" style="padding: 10px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 10px;">
+                    <div style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 8px; font-weight: 500;">Model-Service Status</div>
+                    <div class="model-status-item" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; font-size: 0.9em;">
+                        <span>Text:</span>
+                        <span id="modelStatusText" style="color: var(--text-secondary);">-</span>
+                    </div>
+                    <div class="model-status-item" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; font-size: 0.9em;">
+                        <span>Audio:</span>
+                        <span id="modelStatusAudio" style="color: var(--text-secondary);">-</span>
+                    </div>
+                    <div class="model-status-item" style="display: flex; justify-content: space-between; align-items: center; font-size: 0.9em;">
+                        <span>Bild:</span>
+                        <span id="modelStatusImage" style="color: var(--text-secondary);">-</span>
+                    </div>
+                </div>
+                
+                <div class="system-stats" id="systemStats">
+                    <div class="stat-item">
+                        <span class="stat-label">CPU:</span>
+                        <span class="stat-value" id="cpuPercent">-</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">RAM:</span>
+                        <span class="stat-value" id="ramPercent">-</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">GPU:</span>
+                        <span class="stat-value" id="gpuPercent">-</span>
+                    </div>
                 </div>
                 
                 <div class="settings-toggle">
                     <button class="btn-settings" id="btnSettings">⚙️ Einstellungen</button>
+                    <button class="btn-restart" id="btnRestart" style="width: 100%; margin-top: 10px; padding: 10px; background: var(--warning, #e67e22); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">🔄 Server neu starten</button>
                 </div>
             </div>
         </aside>
@@ -36,25 +64,31 @@
         <!-- Main Chat Area -->
         <main class="chat-container">
             <div class="chat-header">
-                <h2 id="chatTitle">Neues Gespräch</h2>
+                <div class="header-left">
+                    <h2 id="chatTitle">Neues Gespräch</h2>
+                </div>
                 <div class="header-right">
-                    <div class="system-stats" id="systemStats">
-                        <div class="stat-item">
-                            <span class="stat-label">CPU:</span>
-                            <span class="stat-value" id="cpuPercent">-</span>
+                    <div class="status-indicators" id="statusIndicators" style="display: flex; flex-direction: column; gap: 5px; align-items: flex-end;">
+                        <div class="status-indicator" id="statusTextModel" style="display: none;">
+                            <span class="status-dot" style="background: var(--accent);"></span>
+                            <span class="status-label">Text:</span>
+                            <span class="status-value" id="statusTextValue">Bereit</span>
                         </div>
-                        <div class="stat-item">
-                            <span class="stat-label">RAM:</span>
-                            <span class="stat-value" id="ramPercent">-</span>
+                        <div class="status-indicator" id="statusImageModel" style="display: none;">
+                            <span class="status-dot" style="background: #9b59b6;"></span>
+                            <span class="status-label">Bild:</span>
+                            <span class="status-value" id="statusImageValue">-</span>
                         </div>
-                        <div class="stat-item">
-                            <span class="stat-label">GPU:</span>
-                            <span class="stat-value" id="gpuPercent">-</span>
+                        <div class="status-indicator" id="statusAudioModel" style="display: none;">
+                            <span class="status-dot" style="background: #e67e22;"></span>
+                            <span class="status-label">Audio:</span>
+                            <span class="status-value" id="statusAudioValue">-</span>
                         </div>
-                    </div>
-                    <div class="status-indicator" id="statusIndicator">
-                        <span class="status-dot"></span>
-                        <span id="statusText">Bereit</span>
+                        <!-- Fallback für alte Statusanzeige -->
+                        <div class="status-indicator" id="statusIndicator" style="display: none;">
+                            <span class="status-dot"></span>
+                            <span id="statusText">Bereit</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -66,16 +100,12 @@
                 </div>
             </div>
             
-            <div class="chat-tabs">
-                <button class="tab-btn active" id="tabChat">💬 Chat</button>
-                <button class="tab-btn" id="tabImage">🖼️ Bild</button>
-            </div>
-            
             <div class="chat-input-container" id="chatInputContainer">
                 <div class="file-upload-area" id="fileUploadArea">
                     <input type="file" id="fileInput" accept=".csv,.txt,.json" style="display: none;" multiple>
                     <button class="btn-upload" id="btnUpload" title="Datei hochladen">📎</button>
                     <button class="btn-microphone" id="btnMicrophone" title="Spracheingabe">🎤</button>
+                    <button class="btn-agent-mode" id="btnAgentMode" title="Agent-Modus (WebSearch & Dateimanipulation)">🤖</button>
                     <div class="uploaded-files" id="uploadedFiles"></div>
                 </div>
                 <div class="input-wrapper">
@@ -90,17 +120,74 @@
             </div>
             
             <div class="image-input-container" id="imageInputContainer" style="display: none;">
-                <div class="image-model-selector" style="margin-bottom: 10px;">
-                    <label for="imageModelSelect" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Bildgenerierungs-Modell:</label>
-                    <select id="imageModelSelect" class="model-select" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
-                        <option value="">Lade Modelle...</option>
-                    </select>
+                <div class="image-size-mode" style="margin-bottom: 10px;">
+                    <label style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Größen-Modus:</label>
+                    <div style="display: flex; gap: 10px;">
+                        <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                            <input type="radio" name="imageSizeMode" id="imageSizeModeRatio" value="ratio" checked>
+                            <span>Aspect Ratio</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                            <input type="radio" name="imageSizeMode" id="imageSizeModeCustom" value="custom">
+                            <span>Custom Size</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Ratio-Modus -->
+                <div id="ratioModeContainer" style="margin-bottom: 10px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                        <div>
+                            <label for="imageResolutionPreset" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Auflösung:</label>
+                            <select id="imageResolutionPreset" class="model-select" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                                <option value="l">L (1024px)</option>
+                                <option value="m">M (720px)</option>
+                                <option value="s">S (512px)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="imageAspectRatio" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Aspect Ratio:</label>
+                            <select id="imageAspectRatio" class="model-select" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                                <option value="1:1">1:1 (Quadrat)</option>
+                                <option value="16:9">16:9 (Breit)</option>
+                                <option value="9:16">9:16 (Hoch)</option>
+                                <option value="4:3">4:3 (Standard)</option>
+                                <option value="3:4">3:4 (Portrait)</option>
+                                <option value="custom">Custom Ratio</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="customRatioContainer" style="display: none; margin-bottom: 10px;">
+                        <label for="customRatioW" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Custom Ratio (W:H):</label>
+                        <div style="display: flex; gap: 5px; align-items: center;">
+                            <input type="number" id="customRatioW" placeholder="W" min="0.1" max="10" step="0.1" style="flex: 1; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                            <span>:</span>
+                            <input type="number" id="customRatioH" placeholder="H" min="0.1" max="10" step="0.1" style="flex: 1; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                        </div>
+                    </div>
+                    <div style="font-size: 0.85em; color: var(--text-secondary); padding: 8px; background: var(--bg-tertiary); border-radius: 8px;">
+                        <span id="ratioPreview">Dimensionen: 1024 x 1024 px</span>
+                    </div>
+                </div>
+                
+                <!-- Custom Size-Modus -->
+                <div id="customSizeModeContainer" style="display: none; margin-bottom: 10px;">
+                    <div class="image-dimensions" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div>
+                            <label for="imageWidth" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Breite (px):</label>
+                            <input type="number" id="imageWidth" value="1024" min="256" max="2048" step="8" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                        </div>
+                        <div>
+                            <label for="imageHeight" style="display: block; margin-bottom: 5px; font-size: 0.9em; color: var(--text-secondary);">Höhe (px):</label>
+                            <input type="number" id="imageHeight" value="1024" min="256" max="2048" step="8" style="width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary);">
+                        </div>
+                    </div>
                 </div>
                 <div class="image-input-wrapper">
                     <textarea 
                         id="imagePromptInput" 
                         placeholder="Beschreiben Sie das Bild, das Sie generieren möchten..."
-                        rows="3"
+                        rows="1"
                     ></textarea>
                     <div class="image-controls">
                         <button class="btn-generate-image" id="btnGenerateImage" disabled>🎨 Bild generieren</button>
@@ -134,6 +221,19 @@
                 </div>
                 
                 <div class="settings-section">
+                    <h3>Modell</h3>
+                    <div class="setting-item">
+                        <label for="conversationModelSelect">Modell für diese Conversation:</label>
+                        <select id="conversationModelSelect" class="model-select" style="width: 100%; padding: 8px; margin-top: 5px;">
+                            <option value="">Globales Modell verwenden</option>
+                        </select>
+                        <p class="setting-description">
+                            Wählen Sie ein spezifisches Modell für diese Conversation. Wenn kein Modell ausgewählt ist, wird das globale Modell verwendet.
+                        </p>
+                    </div>
+                </div>
+                
+                <div class="settings-section">
                     <h3>Generierung</h3>
                     <div class="setting-item">
                         <label for="temperatureSlider">Temperature: <span id="temperatureValue">0.3</span></label>
@@ -141,16 +241,131 @@
                         <p class="setting-description">Kreativität der Antworten (0 = konservativ, 1 = kreativ)</p>
                     </div>
                     <div class="setting-item">
-                        <label for="maxLengthSlider">Max. Länge: <span id="maxLengthValue">512</span></label>
-                        <input type="range" id="maxLengthSlider" min="100" max="2048" step="100" value="512">
+                        <label for="maxLengthSlider">Max. Länge: <span id="maxLengthValue">2048</span></label>
+                        <input type="range" id="maxLengthSlider" min="100" max="4096" step="100" value="2048">
                         <p class="setting-description">Maximale Länge der Antworten</p>
                     </div>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Audio / Spracherkennung</h3>
+                    <div class="setting-item">
+                        <label for="transcriptionLanguageSelect">Ausgabesprache für Transkription:</label>
+                        <select id="transcriptionLanguageSelect" class="model-select" style="width: 100%; padding: 8px; margin-top: 5px;">
+                            <option value="">Auto (Sprache automatisch erkennen)</option>
+                            <option value="de">Deutsch</option>
+                            <option value="en">Englisch</option>
+                            <option value="fr">Französisch</option>
+                            <option value="es">Spanisch</option>
+                            <option value="it">Italienisch</option>
+                            <option value="pt">Portugiesisch</option>
+                            <option value="ru">Russisch</option>
+                            <option value="ja">Japanisch</option>
+                            <option value="zh">Chinesisch</option>
+                            <option value="ko">Koreanisch</option>
+                            <option value="ar">Arabisch</option>
+                            <option value="nl">Niederländisch</option>
+                            <option value="pl">Polnisch</option>
+                            <option value="tr">Türkisch</option>
+                            <option value="sv">Schwedisch</option>
+                            <option value="no">Norwegisch</option>
+                            <option value="da">Dänisch</option>
+                            <option value="fi">Finnisch</option>
+                            <option value="cs">Tschechisch</option>
+                            <option value="hu">Ungarisch</option>
+                            <option value="ro">Rumänisch</option>
+                            <option value="el">Griechisch</option>
+                            <option value="he">Hebräisch</option>
+                            <option value="hi">Hindi</option>
+                            <option value="th">Thailändisch</option>
+                            <option value="vi">Vietnamesisch</option>
+                            <option value="id">Indonesisch</option>
+                            <option value="ms">Malaiisch</option>
+                            <option value="uk">Ukrainisch</option>
+                            <option value="bg">Bulgarisch</option>
+                            <option value="hr">Kroatisch</option>
+                            <option value="sk">Slowakisch</option>
+                            <option value="sl">Slowenisch</option>
+                            <option value="sr">Serbisch</option>
+                            <option value="et">Estnisch</option>
+                            <option value="lv">Lettisch</option>
+                            <option value="lt">Litauisch</option>
+                            <option value="ca">Katalanisch</option>
+                            <option value="eu">Baskisch</option>
+                            <option value="ga">Irisch</option>
+                            <option value="cy">Walisisch</option>
+                            <option value="mt">Maltesisch</option>
+                            <option value="is">Isländisch</option>
+                        </select>
+                        <p class="setting-description">
+                            Wählen Sie die Ausgabesprache für Audio-Transkriptionen. Wenn "Auto" gewählt ist, wird die Sprache automatisch erkannt. Sie können auf Deutsch sprechen und die Ausgabe in Englisch erhalten (oder umgekehrt).
+                        </p>
+                    </div>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Model Manager</h3>
+                    <button class="btn-model-manager" id="btnModelManager" style="width: 100%; padding: 10px; background: var(--accent); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; margin-bottom: 10px;">🔧 Model Manager öffnen</button>
+                    <p class="setting-description">
+                        Öffnet den separaten Model Manager (läuft unabhängig vom Server)
+                    </p>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Performance</h3>
+                    <div class="setting-item">
+                        <label for="cpuThreadsSlider">CPU Threads: <span id="cpuThreadsValue">Auto</span></label>
+                        <input type="range" id="cpuThreadsSlider" min="1" max="16" step="1" value="0">
+                        <p class="setting-description">Anzahl CPU-Threads (0 = Auto, mehr = schneller aber mehr CPU-Auslastung)</p>
+                    </div>
+                    <div class="setting-item">
+                        <label for="gpuOptimizationSelect">GPU Optimierung:</label>
+                        <select id="gpuOptimizationSelect" class="model-select" style="width: 100%; padding: 8px; margin-top: 5px;">
+                            <option value="balanced">Ausgewogen (Standard)</option>
+                            <option value="speed">Maximale Geschwindigkeit</option>
+                            <option value="memory">Speicher-effizient</option>
+                        </select>
+                        <p class="setting-description">Geschwindigkeit vs. Speicherverbrauch (nur bei GPU)</p>
+                    </div>
+                    <div class="setting-item">
+                        <label>
+                            <input type="checkbox" id="disableCpuOffload">
+                            <span style="margin-left: 8px;">CPU-Offloading deaktivieren (mehr GPU-Nutzung)</span>
+                        </label>
+                        <p class="setting-description">Deaktiviert automatisches CPU-Offloading für maximale GPU-Auslastung</p>
+                    </div>
+                    <button class="btn-reset" id="btnApplyPerformance" style="margin-top: 10px;">Performance-Einstellungen anwenden</button>
+                    <p class="setting-description" style="font-size: 0.85em; color: var(--text-secondary); margin-top: 5px;">
+                        Hinweis: Änderungen werden beim nächsten Modell-Laden wirksam
+                    </p>
                 </div>
             </div>
         </div>
     </div>
     
+    <!-- Pipeline Editor Window (separates Fenster) -->
+    <div id="pipelineEditorWindow" class="pipeline-editor-window" style="display: none;">
+        <div class="pipeline-editor-header">
+            <h2>Pipeline Editor</h2>
+            <button id="btnClosePipelineEditor" class="btn-close">×</button>
+        </div>
+        <div class="pipeline-editor-content">
+            <div class="pipeline-toolbar">
+                <button id="btnAddPromptAgent" class="btn-add-agent">+ Prompt Agent</button>
+                <button id="btnAddImageAgent" class="btn-add-agent">+ Image Agent</button>
+                <button id="btnAddVisionAgent" class="btn-add-agent">+ Vision Agent</button>
+                <button id="btnRunPipeline" class="btn-run-pipeline">▶ Pipeline ausführen</button>
+            </div>
+            <div id="pipelineCanvas" class="pipeline-canvas"></div>
+            <div class="pipeline-input">
+                <label>Initialer Input:</label>
+                <textarea id="pipelineInput" placeholder="Geben Sie den initialen Input ein..."></textarea>
+            </div>
+        </div>
+    </div>
+    
     <script src="app.js"></script>
+    <script src="pipeline_editor.js"></script>
 </body>
 </html>
 

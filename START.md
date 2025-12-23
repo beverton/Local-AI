@@ -51,3 +51,11 @@ Nachdem der Server läuft, öffnen Sie eine der folgenden URLs im Browser:
 - Ändern Sie den Port in `backend/main.py` (Zeile 229) oder in `config.json`
 
 
+
+
+
+
+
+
+
+

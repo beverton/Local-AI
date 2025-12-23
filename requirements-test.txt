@@ -1,0 +1,13 @@
+# Test-Dependencies
+# Nur nötig wenn Tests ausgeführt werden sollen
+
+requests>=2.31.0
+pytest>=7.4.0
+
+
+
+
+
+
+
+
