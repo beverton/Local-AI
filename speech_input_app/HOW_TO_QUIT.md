@@ -29,3 +29,4 @@ Falls die App über ein Terminal gestartet wurde:
 Die App läuft im Hintergrund. Das Batch-Fenster schließt sich automatisch, wenn die App startet. Um die App zu beenden, nutze immer das System-Tray-Menü (Methode 1).
 
 
+

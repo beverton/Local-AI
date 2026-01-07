@@ -60,3 +60,4 @@ Du erhältst Prompts und generierst daraus Bilder."""
 
 
 
+

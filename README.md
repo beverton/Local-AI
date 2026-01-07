@@ -10,6 +10,7 @@ Ein webbasierter lokaler AI-Dienst für Ihren PC. Nutzen Sie Ihre eigenen AI-Mod
 - 🎯 **Preference Learning** (optional): Die AI lernt aus Ihren Interaktionen
 - ⚙️ **Flexibel**: Einfaches Wechseln zwischen verschiedenen Modellen
 - 🔒 **100% Offline**: Keine Cloud-Abhängigkeiten, alles lokal
+- 🌐 **Smart Browser Tabs**: Intelligentes Tab-Management - refresht existierende Tabs statt neue zu öffnen
 
 ## Voraussetzungen
 
@@ -49,14 +50,26 @@ pip install -r requirements.txt
    - Die Pfade sollten zu Ihren Modell-Verzeichnissen zeigen
 
 5. **Server starten:**
-```bash
-cd backend
-python main.py
-```
+
+   **Automatisch (empfohlen):**
+   ```bash
+   # Windows
+   start_local_ai.bat
+   ```
+   - Startet automatisch Model Service und Local AI Server
+   - Öffnet Browser-Tabs (oder refresht existierende)
+   - Zum Beenden: `stop_server.bat`
+
+   **Manuell:**
+   ```bash
+   cd backend
+   python main.py
+   ```
 
 6. **Frontend öffnen:**
-   - Öffnen Sie `frontend/index.html` im Browser
+   - Bei automatischem Start: Browser öffnet sich automatisch
    - Oder navigieren Sie zu `http://127.0.0.1:8000/static/index.html`
+   - Model Manager: `http://127.0.0.1:8001`
 
 ## Konfiguration
 
@@ -87,6 +100,21 @@ Setzen Sie `default_model` in `config.json` auf die ID Ihres bevorzugten Modells
 2. **Gespräch starten**: Klicken Sie auf "+ Neues Gespräch" oder stellen Sie direkt eine Frage
 3. **Gespräch fortsetzen**: Klicken Sie auf ein Gespräch in der Sidebar
 4. **Einstellungen**: Klicken Sie auf "⚙️ Einstellungen" für erweiterte Optionen
+
+## Smart Browser Tab Management
+
+Das Startskript `start_local_ai.bat` verwendet intelligentes Tab-Management:
+
+- ✅ **Erster Start**: Öffnet neue Browser-Tabs für Model Manager und Frontend
+- 🔄 **Wiederholter Start**: Refresht existierende Tabs statt neue zu öffnen
+- 🧹 **Automatisches Cleanup**: `stop_server.bat` löscht den Tab-Status
+
+**Vorteile:**
+- Keine Tab-Flut mehr bei mehrmaligem Neustart
+- Automatischer Refresh der Seiten
+- Funktioniert mit allen Standard-Browsern (Chrome, Edge, Firefox)
+
+**Mehr Informationen:** Siehe [docs/SMART_BROWSER_TABS.md](docs/SMART_BROWSER_TABS.md)
 
 ## API Endpunkte
 

@@ -84,3 +84,4 @@ PyInstaller-Executables werden manchmal von Antivirus-Software als verdächtig e
 - Den Build mit Code-Signing durchführen (erfordert Zertifikat)
 
 
+

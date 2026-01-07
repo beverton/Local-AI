@@ -1,5 +1,5 @@
 {
-  "web_validation": false,
+  "web_validation": true,
   "contradiction_check": true,
   "hallucination_check": true,
   "actuality_check": true,

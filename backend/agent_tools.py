@@ -299,118 +299,102 @@ def call_agent(conversation_id: str, agent_id: str, message: str) -> str:
     return _agent_manager.call_agent(conversation_id, None, agent_id, message)
 
 
-def web_search(query: str, max_results: int = 5, timeout: float = 3.0) -> Dict[str, Any]:
+def web_search(query: str, max_results: int = 5, timeout: float = 5.0) -> Dict[str, Any]:
     """
-    Führt eine Websuche durch und gibt strukturierte Ergebnisse zurück
+    🔧 VERBESSERTE WEB-SUCHE mit Wikipedia-Integration
+    
+    Führt eine Websuche durch und gibt strukturierte Ergebnisse zurück.
+    Strategie: 1. Wikipedia (für Fakten), 2. DuckDuckGo (allgemein), 3. Google Fallback
     
     Args:
         query: Die Suchanfrage
         max_results: Maximale Anzahl der Ergebnisse (Standard: 5)
-        timeout: Timeout in Sekunden (Standard: 3.0) - kurz um Blockierung zu vermeiden
+        timeout: Timeout in Sekunden (Standard: 5.0)
         
     Returns:
         Dict mit "results" (Liste von Ergebnissen) und "summary"
-        
-    Note:
-        Diese Funktion verwendet eine einfache Suchmaschinen-API oder
-        kann erweitert werden für spezifische Suchmaschinen
-        WICHTIG: Hat kurzes Timeout um Server-Blockierung zu vermeiden
     """
+    results = []
+    
+    # STRATEGIE 1: Wikipedia API (sehr zuverlässig für faktische Fragen)
     try:
-        # Einfache Implementierung: Suche über DuckDuckGo HTML-Interface
-        # Für produktive Nutzung sollte eine API verwendet werden
-        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        # Wikipedia Suche (Deutsch)
+        wiki_search_url = f"https://de.wikipedia.org/w/api.php?action=opensearch&search={requests.utils.quote(query)}&limit={max_results}&namespace=0&format=json"
         
-        response = requests.get(url, headers=headers, timeout=timeout)  # Kurzes Timeout um Blockierung zu vermeiden
-        response.raise_for_status()
+        headers = {'User-Agent': 'LocalAI/1.0'}
+        wiki_response = requests.get(wiki_search_url, headers=headers, timeout=timeout)
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        
-        # Parse DuckDuckGo HTML-Ergebnisse - verschiedene Selektoren versuchen
-        # DuckDuckGo hat verschiedene HTML-Strukturen
-        result_divs = soup.find_all('div', class_='result', limit=max_results)
-        
-        # Falls keine Ergebnisse mit class='result', versuche andere Selektoren
-        if not result_divs:
-            result_divs = soup.find_all('div', {'class': re.compile(r'result')}, limit=max_results)
-        
-        # Falls immer noch keine, versuche allgemeine Ergebnis-Container
-        if not result_divs:
-            result_divs = soup.find_all(['div', 'article'], limit=max_results * 2)
-        
-        for div in result_divs:
-            # Versuche verschiedene Selektoren für Titel
-            title_elem = (div.find('a', class_='result__a') or 
-                         div.find('a', class_=re.compile(r'title|heading')) or
-                         div.find('h2') or div.find('h3') or
-                         div.find('a', href=True))
-            
-            # Versuche verschiedene Selektoren für Snippet
-            snippet_elem = (div.find('a', class_='result__snippet') or
-                           div.find('div', class_=re.compile(r'snippet|description|summary')) or
-                           div.find('p'))
-            
-            # Versuche verschiedene Selektoren für URL
-            url_elem = (div.find('a', class_='result__url') or
-                       div.find('a', href=True))
-            
-            if title_elem:
-                title = title_elem.get_text(strip=True)
-                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ''
-                url = url_elem.get('href', '') if url_elem else ''
+        if wiki_response.status_code == 200:
+            wiki_data = wiki_response.json()
+            # Format: [search_term, [titles], [descriptions], [urls]]
+            if len(wiki_data) >= 4:
+                titles = wiki_data[1]
+                descriptions = wiki_data[2]
+                urls = wiki_data[3]
                 
-                # Bereinige URL (DuckDuckGo hat manchmal redirect URLs)
-                if url.startswith('/l/?kh='):
-                    # DuckDuckGo redirect URL - extrahiere echte URL
-                    try:
-                        import urllib.parse
-                        parsed = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                        if 'uddg' in parsed:
-                            url = parsed['uddg'][0]
-                    except:
-                        pass
-                
-                # Nur hinzufügen wenn Titel nicht leer ist
-                if title and len(title) > 3:
-                    result = {
-                        "title": title,
-                        "url": url,
-                        "snippet": snippet[:500] if snippet else ''  # Begrenze Snippet-Länge
-                    }
-                    results.append(result)
-                    
-                    if len(results) >= max_results:
-                        break
-        
-        # Falls keine Ergebnisse gefunden, versuche alternative Methode
-        if not results:
-            # Fallback: Suche mit einfachem Text-Matching
-            results = [{
-                "title": f"Suchergebnis für: {query}",
-                "url": url,
-                "snippet": "Keine strukturierten Ergebnisse gefunden. Bitte verwenden Sie eine spezifische Suchmaschinen-API für bessere Ergebnisse."
-            }]
-        
-        summary = f"Gefunden: {len(results)} Ergebnis(se) für '{query}'"
-        
-        logger.info(f"Websuche durchgeführt: {query} - {len(results)} Ergebnisse")
-        
-        return {
-            "results": results,
-            "summary": summary,
-            "query": query
-        }
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Fehler bei der Websuche: {e}")
-        raise RuntimeError(f"Websuche fehlgeschlagen: {str(e)}")
+                for i in range(min(len(titles), max_results)):
+                    if titles[i] and urls[i]:
+                        results.append({
+                            "title": titles[i],
+                            "url": urls[i],
+                            "snippet": descriptions[i] if i < len(descriptions) else f"Wikipedia-Artikel über {titles[i]}"
+                        })
+                        
+        if results:
+            logger.info(f"Wikipedia-Suche erfolgreich: {query} - {len(results)} Ergebnisse")
     except Exception as e:
-        logger.error(f"Unerwarteter Fehler bei der Websuche: {e}")
-        raise
+        logger.debug(f"Wikipedia-Suche fehlgeschlagen: {e}")
+    
+    # STRATEGIE 2: DuckDuckGo (falls Wikipedia keine Ergebnisse)
+    if not results:
+        try:
+            api_url = f"https://api.duckduckgo.com/?q={requests.utils.quote(query)}&format=json&no_html=1&skip_disambig=1"
+            headers = {'User-Agent': 'LocalAI/1.0'}
+            
+            response = requests.get(api_url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Extrahiere Instant Answer
+            if data.get('Abstract'):
+                results.append({
+                    "title": data.get('Heading', query.title()),
+                    "url": data.get('AbstractURL', f"https://duckduckgo.com/?q={requests.utils.quote(query)}"),
+                    "snippet": data.get('Abstract', '')
+                })
+            
+            # Extrahiere Related Topics
+            for topic in data.get('RelatedTopics', [])[:max_results]:
+                if isinstance(topic, dict) and 'Text' in topic:
+                    results.append({
+                        "title": topic.get('Text', '').split(' - ')[0] if ' - ' in topic.get('Text', '') else topic.get('Text', ''),
+                        "url": topic.get('FirstURL', ''),
+                        "snippet": topic.get('Text', '')
+                    })
+                    
+            if results:
+                logger.info(f"DuckDuckGo-Suche erfolgreich: {query} - {len(results)} Ergebnisse")
+        except Exception as e:
+            logger.debug(f"DuckDuckGo-Suche fehlgeschlagen: {e}")
+    
+    # STRATEGIE 3: Fallback mit Google-Suchlink (nur wenn keine Ergebnisse)
+    if not results:
+        logger.warning(f"Keine Web-Ergebnisse gefunden für: {query}, verwende Google-Fallback")
+        results = [{
+            "title": f"Suche nach: {query}",
+            "url": f"https://www.google.com/search?q={requests.utils.quote(query)}",
+            "snippet": f"Keine direkten Ergebnisse gefunden. Suchen Sie auf Google nach '{query}' für mehr Informationen."
+        }]
+    
+    summary = f"Gefunden: {len(results)} Ergebnis(se) für '{query}'"
+    logger.info(f"Web-Suche abgeschlossen: {query} - {len(results)} Ergebnisse")
+    
+    return {
+        "results": results,
+        "summary": summary,
+        "query": query
+    }
 
 
 def list_directory(directory_path: str = ".") -> List[Dict[str, Any]]:

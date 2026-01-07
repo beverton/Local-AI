@@ -131,6 +131,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPerformanceSettings();
     loadAudioSettings();
     loadQualitySettings();
+    loadOutputSettings();
     startSystemStatsUpdate();
     
     // Lade initialen Status einmalig (kein automatisches Polling mehr)
@@ -264,6 +265,17 @@ function setupEventListeners() {
             saveAudioSettings();
         });
     }
+    
+    // Output-Einstellungen
+    const btnApplyOutputSettings = document.getElementById('btnApplyOutputSettings');
+    const btnOpenOutputFolder = document.getElementById('btnOpenOutputFolder');
+    if (btnApplyOutputSettings) {
+        btnApplyOutputSettings.addEventListener('click', saveOutputSettings);
+    }
+    if (btnOpenOutputFolder) {
+        btnOpenOutputFolder.addEventListener('click', openOutputFolder);
+    }
+    
     btnGenerateImage.addEventListener('click', generateImage);
     btnCancelImage.addEventListener('click', cancelImageGeneration);
     imagePromptInput.addEventListener('input', () => {
@@ -766,7 +778,9 @@ async function loadStatus() {
 async function loadConversations() {
     try {
         const data = await apiCall('/conversations');
-        renderConversations(data.conversations);
+        // Null-Check: Falls keine Conversations vorhanden sind
+        const conversations = data?.conversations || [];
+        renderConversations(conversations);
     } catch (error) {
         console.error('Fehler beim Laden der Gespräche:', error);
         conversationsList.innerHTML = '<div class="loading">Fehler beim Laden</div>';
@@ -800,6 +814,7 @@ function renderConversations(conversations) {
     
     // Restore scroll position
     conversationsList.scrollTop = scrollTop;
+    
     
     // Add click listeners
     conversationsList.querySelectorAll('.conversation-item').forEach(item => {
@@ -960,6 +975,7 @@ async function createNewImageConversation() {
 async function deleteConversation(conversationId, event) {
     event.stopPropagation();
     if (!confirm('Gespräch wirklich löschen?')) return;
+    
     
     try {
         // Lösche sofort aus UI (optimistic update)
@@ -1431,6 +1447,14 @@ function addImageToChat(prompt, imageUrl) {
         </div>
     `;
     
+    // Füge Click-Event für Lightbox hinzu
+    const img = messageDiv.querySelector('.generated-image');
+    if (img) {
+        img.addEventListener('click', () => {
+            showImageLightbox(imageUrl, prompt);
+        });
+    }
+    
     // Remove welcome message if exists
     const welcomeMsg = chatMessages.querySelector('.welcome-message');
     if (welcomeMsg) {
@@ -1439,6 +1463,58 @@ function addImageToChat(prompt, imageUrl) {
     
     chatMessages.appendChild(messageDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function showImageLightbox(imageUrl, prompt) {
+    // Erstelle Lightbox-Overlay
+    const lightbox = document.createElement('div');
+    lightbox.className = 'image-lightbox';
+    lightbox.innerHTML = `
+        <div class="lightbox-overlay"></div>
+        <div class="lightbox-content">
+            <div class="lightbox-header">
+                <div class="lightbox-prompt">${escapeHtml(prompt)}</div>
+                <button class="lightbox-close">×</button>
+            </div>
+            <img src="${imageUrl}" alt="Generated image" class="lightbox-image" />
+            <div class="lightbox-actions">
+                <button class="btn-download" onclick="downloadImage('${imageUrl}', '${escapeHtml(prompt)}')">💾 Download</button>
+            </div>
+        </div>
+    `;
+    
+    document.body.appendChild(lightbox);
+    
+    // Close on overlay click
+    const overlay = lightbox.querySelector('.lightbox-overlay');
+    const closeBtn = lightbox.querySelector('.lightbox-close');
+    
+    const closeLightbox = () => {
+        lightbox.remove();
+    };
+    
+    overlay.addEventListener('click', closeLightbox);
+    closeBtn.addEventListener('click', closeLightbox);
+    
+    // Close on ESC key
+    const handleEsc = (e) => {
+        if (e.key === 'Escape') {
+            closeLightbox();
+            document.removeEventListener('keydown', handleEsc);
+        }
+    };
+    document.addEventListener('keydown', handleEsc);
+}
+
+function downloadImage(imageUrl, prompt) {
+    // Erstelle Download-Link
+    const link = document.createElement('a');
+    link.href = imageUrl;
+    const filename = `${prompt.substring(0, 30).replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 }
 
 function addMessageToChat(role, content, isLoading = false, files = []) {
@@ -1474,7 +1550,7 @@ function addMessageToChat(role, content, isLoading = false, files = []) {
     messageDiv.innerHTML = `
         <div class="message-avatar">${avatar}</div>
         <div class="message-content">
-            ${escapeHtml(content)}
+            ${formatMessageContent(content)}
             ${filePreviews}
             ${!isLoading ? `<div class="message-timestamp">${timestamp}</div>` : ''}
         </div>
@@ -1593,6 +1669,71 @@ async function saveAudioSettings() {
     }
 }
 
+// Output-Einstellungen
+async function loadOutputSettings() {
+    try {
+        const data = await apiCall('/output/settings');
+        const outputBaseDirectory = document.getElementById('outputBaseDirectory');
+        const outputUseDateFolders = document.getElementById('outputUseDateFolders');
+        const outputFilenameFormat = document.getElementById('outputFilenameFormat');
+        
+        if (outputBaseDirectory && data.base_directory) {
+            outputBaseDirectory.value = data.base_directory;
+        }
+        if (outputUseDateFolders && data.use_date_folders !== undefined) {
+            outputUseDateFolders.checked = data.use_date_folders;
+        }
+        if (outputFilenameFormat && data.filename_format) {
+            outputFilenameFormat.value = data.filename_format;
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der Output-Einstellungen:', error);
+    }
+}
+
+async function saveOutputSettings() {
+    try {
+        const outputBaseDirectory = document.getElementById('outputBaseDirectory');
+        const outputUseDateFolders = document.getElementById('outputUseDateFolders');
+        const outputFilenameFormat = document.getElementById('outputFilenameFormat');
+        
+        const response = await apiCall('/output/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                base_directory: outputBaseDirectory ? outputBaseDirectory.value : null,
+                use_date_folders: outputUseDateFolders ? outputUseDateFolders.checked : null,
+                filename_format: outputFilenameFormat ? outputFilenameFormat.value : null
+            })
+        });
+        
+        if (response) {
+            alert('Output-Einstellungen erfolgreich gespeichert!');
+        }
+    } catch (error) {
+        console.error('Fehler beim Speichern der Output-Einstellungen:', error);
+        alert('Fehler beim Speichern: ' + error.message);
+    }
+}
+
+function openOutputFolder() {
+    const outputBaseDirectory = document.getElementById('outputBaseDirectory');
+    if (outputBaseDirectory && outputBaseDirectory.value) {
+        // Versuche den Ordner zu öffnen
+        // Im Browser können wir nicht direkt OS-Ordner öffnen,
+        // aber wir können eine Benachrichtigung anzeigen
+        alert(`Output-Ordner:\n${outputBaseDirectory.value}\n\nBitte öffnen Sie diesen Ordner im Windows Explorer.`);
+        
+        // Kopiere Pfad in Zwischenablage falls möglich
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(outputBaseDirectory.value).then(() => {
+                console.log('Pfad in Zwischenablage kopiert');
+            }).catch(err => {
+                console.error('Fehler beim Kopieren:', err);
+            });
+        }
+    }
+}
+
 // Agent-Modus Funktionen
 async function toggleAgentMode() {
     if (!currentConversationId) {
@@ -1652,6 +1793,38 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function formatMessageContent(text) {
+    /**
+     * Formatiert Nachrichtentext mit klickbaren Links und Markdown-Unterstützung
+     * - Escaped HTML für XSS-Schutz
+     * - Macht URLs klickbar
+     * - Unterstützt Markdown-Links [text](url)
+     * - Erhält Zeilenumbrüche
+     */
+    
+    // Escape HTML zuerst (XSS-Schutz)
+    let escaped = escapeHtml(text);
+    
+    // Markdown-Links erkennen und umwandeln: [text](url)
+    // Pattern: [beliebiger Text](http://... oder https://...)
+    escaped = escaped.replace(
+        /\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer" class="message-link">$1</a>'
+    );
+    
+    // Normale URLs erkennen und klickbar machen (die nicht bereits in einem Link sind)
+    // Pattern: http:// oder https:// gefolgt von nicht-whitespace Zeichen
+    escaped = escaped.replace(
+        /(?<!href=["'])(?<!">)(https?:\/\/[^\s<>"]+)/g,
+        '<a href="$1" target="_blank" rel="noopener noreferrer" class="message-link">$1</a>'
+    );
+    
+    // Zeilenumbrüche in <br> umwandeln
+    escaped = escaped.replace(/\n/g, '<br>');
+    
+    return escaped;
 }
 
 // System Stats Update
@@ -2221,6 +2394,7 @@ function scheduleScrollUpdate() {
 
 // Streaming Chat-Funktion
 async function sendMessageStream(message, conversationId, loadingId) {
+    const streamStartTime = Date.now();
     try {
         const response = await fetch(`${API_BASE}/chat/stream`, {
             method: 'POST',
@@ -2290,11 +2464,16 @@ async function sendMessageStream(message, conversationId, loadingId) {
         const updateQueue = new UpdateQueue();
         let chunkCount = 0;
         
+        let lastLogTime = Date.now();
+        let totalChunks = 0;
+        let totalChars = 0;
+        
         // Lese Stream
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         
         while (true) {
+            const loopStartTime = Date.now();
             const { done, value } = await reader.read();
             if (done) break;
             
@@ -2306,14 +2485,26 @@ async function sendMessageStream(message, conversationId, loadingId) {
                     try {
                         const data = JSON.parse(line.slice(6));
                         if (data.chunk) {
+                            const beforeUpdateTime = Date.now();
+                            totalChunks++;
+                            totalChars += data.chunk.length;
+                            
                             fullResponse += data.chunk;
                             // Zähle Tokens grob (ungefähr 1 Token = 4 Zeichen für deutsche Texte)
                             tokenCount = Math.ceil(fullResponse.length / 4);
                             chunkCount++;
                             
+                            const contentUpdateStartTime = Date.now();
+                            
                             // Content sofort aktualisieren (kritisch für Streaming-Erlebnis)
                             if (contentElement) {
                                 contentElement.textContent = fullResponse; // Sofort, nicht gebatchet
+                            }
+                            
+                            const contentUpdateDuration = Date.now() - contentUpdateStartTime;
+                            const timeSinceLastLog = Date.now() - lastLogTime;
+                            if (timeSinceLastLog >= 500 || totalChunks === 1) {
+                                lastLogTime = Date.now();
                             }
                             
                             // Zeige Fortschrittsanzeige sofort an (nicht gebatchet)
@@ -2322,23 +2513,43 @@ async function sendMessageStream(message, conversationId, loadingId) {
                                 if (progressContainer.style.display === 'none' || !progressContainer.style.display) {
                                     progressContainer.style.display = 'block';
                                 }
+                                const progressUpdateStartTime = Date.now();
+                                
                                 // Nur Werte-Updates batchen (für Performance)
                                 updateQueue.schedule('progress', () => {
                                     const progress = Math.min((tokenCount / maxTokens) * 100, 100);
                                     progressBar.style.width = `${progress}%`;
                                     progressText.textContent = `${tokenCount}/${maxTokens} Tokens (${Math.round(progress)}%)`;
                                 });
+                                
+                                const progressUpdateDuration = Date.now() - progressUpdateStartTime;
+                                if (progressUpdateDuration > 5) {
+                                }
                             }
+                            
+                            const scrollStartTime = Date.now();
                             
                             // Throttled Scroll-Update
                             scheduleScrollUpdate();
+                            
+                            const scrollDuration = Date.now() - scrollStartTime;
+                            if (scrollDuration > 5) {
+                            }
+                            
+                            const beforeYieldTime = Date.now();
                             
                             // Event Loop Yielding nach jedem 10. Chunk
                             if (chunkCount % 10 === 0) {
                                 await new Promise(resolve => setTimeout(resolve, 0));
                             }
+                            
+                            const yieldDuration = Date.now() - beforeYieldTime;
+                            if (yieldDuration > 5 && chunkCount % 10 === 0) {
+                            }
                         }
                         if (data.done) {
+                            const totalDuration = Date.now() - streamStartTime;
+                            
                             // Verstecke Fortschrittsanzeige
                             if (progressContainer) {
                                 progressContainer.style.display = 'none';

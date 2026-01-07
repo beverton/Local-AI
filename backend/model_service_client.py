@@ -207,7 +207,7 @@ class ModelServiceClient:
             logger.error(f"Fehler beim Abrufen des Image-Modell-Status: {e}")
             return None
     
-    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: int = 512, temperature: float = 0.7) -> Optional[Dict[str, Any]]:
+    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: int = 512, temperature: float = 0.7, language: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Sendet Chat-Request an Model-Service"""
         try:
             payload = {
@@ -218,6 +218,8 @@ class ModelServiceClient:
             }
             if messages:
                 payload["messages"] = messages
+            if language:
+                payload["language"] = language
             
             response = requests.post(
                 f"{self.base_url}/chat",
@@ -279,9 +281,8 @@ class ModelServiceClient:
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"Fehler bei Bildgenerierungs-Request: {response.status_code} - {response.text}")
                 return None
         except Exception as e:
-            logger.error(f"Fehler bei Bildgenerierungs-Request: {e}")
+            #logger.error(f"Fehler bei Bildgenerierungs-Request: {e}")
             return None
 

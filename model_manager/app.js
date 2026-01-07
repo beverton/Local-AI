@@ -203,6 +203,7 @@ function getAvailableModels(modelType) {
     const models = {
         text: [
             { id: 'qwen-2.5-3b', name: 'Qwen 2.5 3B' },
+            { id: 'qwen-2.5-7b-instruct', name: 'Qwen 2.5 7B Instruct ⭐' },
             { id: 'phi-3-mini-4k', name: 'Phi-3 Mini 4K Instruct' },
             { id: 'mistral-7b-instruct', name: 'Mistral 7B Instruct' }
         ],
@@ -210,7 +211,7 @@ function getAvailableModels(modelType) {
             { id: 'whisper-large-v3', name: 'Whisper Large V3' }
         ],
         image: [
-            { id: 'flux-1-schnell', name: 'Flux 1 Schnell' }
+            { id: 'sdxl-base-1.0', name: 'Stable Diffusion XL Base 1.0 ⭐' }
         ]
     };
     return models[modelType] || [];

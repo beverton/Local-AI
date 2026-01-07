@@ -1,6 +1,6 @@
 {
   "hotkey": "alt+1",
-  "recording_mode": "continuous",
+  "recording_mode": "toggle",
   "threshold": 0.0,
   "language": "",
   "auto_start": true,

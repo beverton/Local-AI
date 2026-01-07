@@ -1,0 +1,21 @@
+{
+  "id": "b0cda50a-f7dd-4a77-b72c-fd2f55878cdd",
+  "title": "Wer ist Brot und Spüle? Suche nach einer Website.",
+  "created_at": "2026-01-07T20:32:34.250121",
+  "updated_at": "2026-01-07T20:33:44.247100",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Wer ist Brot und Spüle? Suche nach einer Website.",
+      "timestamp": "2026-01-07T20:33:44.245832"
+    },
+    {
+      "role": "assistant",
+      "content": "Brot undSpüle是一款来自德国的厨房用品品牌。您可以访问其官方网站 [https://www;brotundspaule.de](https:// www; b rotun d spaule .de) 获取更多详细信息。请注意，网站地址中包含德语字符和空格，请按照此格式输入以正确导航至官网。",
+      "timestamp": "2026-01-07T20:33:44.247095"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

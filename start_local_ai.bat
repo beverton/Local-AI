@@ -104,9 +104,9 @@ if errorlevel 1 (
     echo Model-Service ist bereit!
 )
 
-REM 4b. Öffne Model Manager im Browser
+REM 4b. Öffne Model Manager im Browser (smart - nur neuer Tab wenn nicht bereits offen)
 echo Öffne Model Manager im Browser...
-start "" "http://127.0.0.1:8001/"
+python scripts\open_or_refresh_browser.py "http://127.0.0.1:8001/"
 
 REM 5. Pruefe ob Port 8000 frei ist, bevor Local AI Server gestartet wird
 echo [5/7] Pruefe Port 8000 vor Local AI Server-Start...
@@ -152,9 +152,9 @@ if errorlevel 1 (
 echo.
 :open_browser
 
-REM 8. Öffne Browser (nicht nummeriert, da optional)
-echo Öffne Browser...
-start "" "http://127.0.0.1:8000/static/index.html"
+REM 8. Öffne Browser (nicht nummeriert, da optional - smart Tab Management)
+echo Öffne Local AI Frontend im Browser...
+python scripts\open_or_refresh_browser.py "http://127.0.0.1:8000/static/index.html"
 
 echo.
 echo ========================================

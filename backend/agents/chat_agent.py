@@ -7,6 +7,7 @@ from .base_agent import BaseAgent
 import logging
 import re
 import json
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,22 +21,17 @@ class ChatAgent(BaseAgent):
         super().__init__(agent_id, conversation_id, model_id, config)
         self.agent_type = "chat_agent"
         self.name = "Chat Agent"
-        self.system_prompt = """Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. 
-Antworte klar und direkt auf Deutsch. 
+        self.system_prompt = """Du bist ein hilfreicher AI-Assistent. Antworte NUR auf Deutsch.
 
-Du hast Zugriff auf verschiedene Tools:
-- web_search: Für Websuchen - gibt dir Suchergebnisse mit Titeln, URLs und Snippets
-- read_file, write_file, list_directory, delete_file, file_exists: Für Datei-Operationen
+KRITISCH - Tool-Ergebnisse nutzen:
+Wenn dir Tool-Ergebnisse (Web-Suche, Dateien) gezeigt werden:
+1. Nutze AUSSCHLIESSLICH diese Informationen - dein Wissen ist veraltet
+2. Kopiere URLs EXAKT wie gezeigt - keine Leerzeichen, keine Änderungen
+3. Tool-Ergebnisse haben IMMER Vorrang vor deinem internen Wissen
 
-WICHTIG: Wenn dir Tool-Ergebnisse präsentiert werden:
-1. Lies die Tool-Ergebnisse sorgfältig durch
-2. Beantworte die Frage des Users basierend auf den Tool-Ergebnissen
-3. Gib eine direkte, hilfreiche Antwort - nicht nur Links oder Referenzen
-4. Bei Web-Suchen: Fasse die wichtigsten Informationen aus den Snippets zusammen und gib eine klare Antwort
-5. Bei Wetterfragen: Gib die konkrete Vorhersage, nicht nur Links zu Wetter-Websites
-6. Bei Rezeptfragen: Gib konkrete Rezepte oder Rezeptvorschläge, nicht nur allgemeine Hinweise
+Beispiel: Wenn Tool zeigt "X ist Y seit 2025" aber du glaubst "X ist Z" → Tool hat Recht, antworte mit "X ist Y seit 2025".
 
-Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."""
+Antworte präzise, klar und ausschließlich auf Deutsch."""
         
         # Verfügbare Tools
         self.available_tools = [
@@ -56,17 +52,27 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
         """
         message_lower = message.lower()
         
-        # WebSearch Patterns
+        # WebSearch Patterns - mit verbesserter Erkennung
+        # WICHTIG: Patterns die mit Fragen beginnen haben Priorität (wer/was/wo/wann/wie)
         web_search_patterns = [
-            r"suche\s+(?:online\s+)?(?:nach\s+)?(?:was\s+)?(.+)",  # "suche online was morgen für wetter"
-            r"finde\s+(?:mir\s+)?(?:online\s+)?(.+)",
-            r"google\s+(?:nach\s+)?(.+)",
-            r"web\s+suche\s+(?:nach\s+)?(.+)",
-            r"internet\s+suche\s+(?:nach\s+)?(.+)",
-            r"was\s+(?:ist|wird|sind|war)\s+(.+)",  # "Was ist Python?", "Was wird morgen für Wetter"
-            r"wer\s+ist\s+(.+)",  # "Wer ist Einstein?"
-            r"wetter\s+(?:in|für)\s+(.+)",  # "Wetter in Berlin"
-            r"wettervorhersage\s+(?:für|in)\s+(.+)",  # "Wettervorhersage für Berlin"
+            # Fragewörter - HOHE PRIORITÄT (extrahieren das Thema direkt)
+            r"^(.+?)\?.*?(?:suche|finde|google|web|website)",  # "Wer ist X? Suche..." -> "Wer ist X"
+            r"wer\s+(?:ist|sind|war|waren)\s+(.+?)(?:\?|$)",  # "Wer ist...?"
+            r"was\s+(?:ist|wird|sind|war|bedeutet)\s+(.+?)(?:\?|$)",  # "Was ist...?"
+            r"wo\s+(?:ist|sind|finde\s+ich|liegt|befindet\s+sich)\s+(.+?)(?:\?|$)",  # "Wo ist...?"
+            r"wann\s+(?:ist|war|findet|beginnt)\s+(.+?)(?:\?|$)",  # "Wann ist...?"
+            r"wie\s+(?:viel|viele|teuer|hoch)\s+(.+?)(?:\?|$)",  # "Wie viel...?"
+            # Such-Keywords mit spezifischem Kontext
+            r"(?:suche|finde|google)\s+(?:nach\s+)?(?:informationen\s+)?(?:über|zu)\s+(.+)",  # "suche nach Infos über X"
+            r"website\s+(?:von|für|über|zu)\s+(.+)",  # "Website von X"
+            r"webseite\s+(?:von|für|über|zu)\s+(.+)",  # "Webseite von X"
+            # Wetter-spezifisch
+            r"wetter\s+(?:in|für|heute|morgen)\s+(.+)",  # "Wetter in..."
+            r"wettervorhersage\s+(?:für|in)\s+(.+)",  # "Wettervorhersage für..."
+            # News/Aktualität
+            r"(?:aktuelle|neueste)\s+(?:informationen|infos|news|nachrichten)\s+(?:über|zu|von)\s+(.+)",
+            # Generische Such-Keywords - NIEDRIGE PRIORITÄT (am Ende)
+            r"(?:suche|finde|google)\s+(.+)",  # Generisch: "suche X"
         ]
         
         # URL-Erkennung
@@ -81,6 +87,12 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
             match = re.search(pattern, message_lower)
             if match:
                 query = match.group(1).strip()
+                
+                # Bereinige Query: Entferne trailing Punkte/Kommas und Such-Keywords am Ende
+                query = re.sub(r'[,\.;]+$', '', query)  # Entferne trailing Satzzeichen
+                query = re.sub(r'\s+(?:suche|finde|google|web|website|webseite|link|url).*$', '', query)  # Entferne Such-Keywords am Ende
+                query = query.strip()
+                
                 if len(query) > 3:  # Mindestlänge für sinnvolle Suche
                     return {"tool_name": "web_search", "params": {"query": query}}
         
@@ -159,17 +171,9 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
         if not self.model_manager:
             raise RuntimeError("ModelManager nicht gesetzt")
         
-        # Stelle sicher, dass Modell geladen ist
-        if not self.model_manager.is_model_loaded():
-            if self.model_id:
-                self.model_manager.load_model(self.model_id)
-            else:
-                # Verwende Default-Modell
-                default_model = self.model_manager.config.get("default_model")
-                if default_model:
-                    self.model_manager.load_model(default_model)
-                else:
-                    raise RuntimeError("Kein Modell verfügbar")
+        # HINWEIS: Modell-Laden wird von main.py/Model-Service gehandhabt
+        # Keine redundante Prüfung hier, da bei Model-Service das Modell
+        # nicht im lokalen model_manager geladen ist
         
         # Erkenne Tool-Bedarf
         tool_info = self._detect_tool_need(message)
@@ -228,11 +232,16 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
             else:
                 tool_result_str = str(tool_result)
             
-            user_message = f"{message}\n\n[Tool-Ergebnis von {tool_used}]:\n{tool_result_str}\n\nBitte beantworte die Frage des Users basierend auf diesen Tool-Ergebnissen. Gib eine direkte, hilfreiche Antwort."
+            user_message = f"""FRAGE: {message}
+
+TOOL-ERGEBNIS [{tool_used}]:
+{tool_result_str}
+
+WICHTIG: Nutze NUR die Tool-Ergebnisse oben, nicht dein internes Wissen. Kopiere URLs exakt wie gezeigt.
+
+Antworte auf Deutsch:"""
         
-        messages.append({"role": "user", "content": user_message})
-        
-        # Stelle sicher, dass Messages korrekt alternieren (user/assistant/user/assistant)
+        messages.append({"role": "user", "content": user_message})# Stelle sicher, dass Messages korrekt alternieren (user/assistant/user/assistant)
         # Entferne doppelte aufeinanderfolgende user oder assistant Messages
         cleaned_messages = []
         last_role = None
@@ -251,14 +260,24 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
         messages = cleaned_messages
         
         # Generiere Antwort
-        try:
-            response = self.model_manager.generate(
-                messages,
-                max_length=1024,  # Längere Antworten für Tool-Ergebnisse
-                temperature=0.7
-            )
-            
-            # Bereinige Response (entferne System-Prompt-Phrasen)
+        try:# 🔥 MODEL SERVICE SUPPORT - Verwende Model Service Client wenn verfügbar
+            if self.model_service_client and self.model_service_client.is_available():
+                # Verwende Model Service
+                result = self.model_service_client.chat(
+                    message=message,
+                    messages=messages,
+                    conversation_id=self.conversation_id,
+                    max_length=1024,
+                    temperature=0.7
+                )
+                response = result.get("response", "") if result else ""
+            else:
+                # Fallback auf lokalen model_manager
+                response = self.model_manager.generate(
+                    messages,
+                    max_length=1024,  # Längere Antworten für Tool-Ergebnisse
+                    temperature=0.7
+                )# Bereinige Response (entferne System-Prompt-Phrasen)
             cleaned_response = response.strip()
             
             # Entferne führende "assistant" falls vorhanden
@@ -282,11 +301,141 @@ Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Na
                         cleaned_lines.append(line)
                 cleaned_response = '\n'.join(cleaned_lines).strip()
             
+            # POST-PROCESSING: Korrigiere URLs aus Tool-Ergebnissen
+            # Verhindert Tippfehler beim Abschreiben von URLs durch das Modell
+            if tool_used == "web_search" and tool_result and isinstance(tool_result, dict):cleaned_response = self._fix_urls_in_response(cleaned_response, tool_result)# POST-PROCESSING: Entferne nicht-deutsche Sprachen (z.B. Chinesisch)
+            # 🔧 DEAKTIVIERT: Diese Funktion ist zu aggressiv und entfernt wichtige Zeichen aus URLs
+            # cleaned_response = self._remove_non_german_text(cleaned_response)
+            
             logger.info(f"ChatAgent Antwort generiert: {len(cleaned_response)} Zeichen, Tool verwendet: {tool_used}")
             return cleaned_response
             
         except Exception as e:
             logger.error(f"Fehler bei Antwort-Generierung: {e}")
             raise
+    
+    def _fix_urls_in_response(self, response: str, web_search_result: Dict[str, Any]) -> str:
+        """
+        Post-Processing: Ersetzt fehlerhafte URLs in der Antwort durch korrekte URLs aus den Tool-Ergebnissen.
+        Verhindert Tippfehler des Modells beim Abschreiben von URLs.
+        
+        Args:
+            response: Die Antwort des Modells
+            web_search_result: Die Web-Search Tool-Ergebnisse mit korrekten URLs
+            
+        Returns:
+            Response mit korrigierten URLs
+        """
+        if not web_search_result.get("results"):
+            return response
+        
+        # Extrahiere alle korrekten URLs aus den Web-Search-Ergebnissen
+        correct_urls = []
+        for result in web_search_result.get("results", []):
+            url = result.get("url", "").strip()
+            if url and url.startswith("http"):
+                correct_urls.append(url)
+        
+        if not correct_urls:
+            return response
+        
+        # Suche nach URLs oder URL-ähnlichen Mustern in der Response
+        # und ersetze sie durch die korrekten URLs
+        import re
+        
+        # Pattern für URLs (auch mit Tippfehlern/Leerzeichen/falschen Zeichen)
+        # Erweitert um häufige Fehler: ; statt ., Leerzeichen, etc.
+        url_pattern = r'<?\s*https?[:/;]+[^\s<>]+\s*>?'
+        
+        # Finde alle URL-ähnlichen Strings in der Response
+        found_urls = re.findall(url_pattern, response)
+        
+        if not found_urls:
+            # Keine URLs in Response gefunden - füge die korrekte URL am Ende hinzu
+            if correct_urls:
+                response += f"\n\nLink: {correct_urls[0]}"
+                logger.info(f"URL hinzugefügt zur Response: {correct_urls[0]}")
+            return response
+        
+        # Ersetze gefundene URLs durch die korrekten URLs
+        for found_url in found_urls:
+            found_url_clean = found_url.strip('<> ')
+            
+            # Finde die beste Übereinstimmung aus den korrekten URLs
+            best_match = None
+            best_score = 0
+            
+            for correct_url in correct_urls:
+                # Berechne Ähnlichkeit (einfache Heuristik)
+                # Normalisiere beide URLs für Vergleich (entferne Sonderzeichen, Leerzeichen)
+                score = 0
+                
+                try:
+                    correct_domain = correct_url.split('/')[2] if correct_url.count('/') >= 2 else correct_url.replace('https://', '').replace('http://', '')
+                    found_domain = found_url_clean.split('/')[2] if found_url_clean.count('/') >= 2 else found_url_clean.replace('https://', '').replace('http://', '').replace('https;//', '').replace('http;//', '')
+                except:
+                    correct_domain = correct_url
+                    found_domain = found_url_clean
+                
+                # Normalisiere für Vergleich: entferne alle nicht-alphanumerischen Zeichen
+                correct_normalized = ''.join(c.lower() for c in correct_domain if c.isalnum())
+                found_normalized = ''.join(c.lower() for c in found_domain if c.isalnum())
+                
+                # Exakte Übereinstimmung nach Normalisierung
+                if correct_normalized == found_normalized:
+                    score = 100
+                # Teilübereinstimmung (mind. 70%)
+                elif correct_normalized in found_normalized or found_normalized in correct_normalized:
+                    score = 80
+                # Domain-Hauptteil stimmt überein
+                elif any(part in found_normalized for part in correct_domain.split('.') if len(part) > 4):
+                    score = 60
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = correct_url
+            
+            # Ersetze wenn gute Übereinstimmung gefunden
+            if best_match and best_score >= 50:
+                response = response.replace(found_url, best_match)
+                logger.info(f"URL korrigiert: {found_url} -> {best_match}")
+        
+        return response
+    
+    def _remove_non_german_text(self, text: str) -> str:
+        """
+        Entfernt nicht-deutsche Zeichen (z.B. Chinesisch, Arabisch) aus der Antwort.
+        Behält: Deutsch, Englisch (für URLs/Code), Zahlen, Satzzeichen.
+        
+        Args:
+            text: Die zu bereinigende Antwort
+            
+        Returns:
+            Bereinigte Antwort ohne nicht-deutsche Zeichen
+        """
+        import re
+        
+        # Pattern für nicht-westliche Schriftzeichen (CJK, Arabisch, etc.)
+        # Erlaubt: Lateinische Buchstaben, Zahlen, deutsche Umlaute, gängige Satzzeichen
+        # Entfernt: Chinesisch, Japanisch, Koreanisch, Arabisch, etc.
+        
+        # Zeichen-Bereiche für CJK (Chinesisch-Japanisch-Koreanisch)
+        cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f\u2b740-\u2b81f\u2b820-\u2ceaf\uf900-\ufaff\u3300-\u33ff\ufe30-\ufe4f\uf900-\ufaff\u2f800-\u2fa1f]+'
+        
+        # Entferne CJK-Zeichen
+        text = re.sub(cjk_pattern, '', text)
+        
+        # Entferne auch isolierte nicht-lateinische Zeichen (außer deutsche Umlaute)
+        # Erlaube: a-z, A-Z, 0-9, äöüßÄÖÜ, Leerzeichen, gängige Satzzeichen
+        # Entferne: alles andere
+        text = re.sub(r'[^\x00-\x7F\u00C0-\u017F\s\[\]\(\)\{\}\<\>\-_.,;:!?\'"\n\r\t/\\@#$%^&*+=]', '', text)
+        
+        # Bereinige mehrfache Leerzeichen
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Bereinige mehrfache Zeilenumbrüche
+        text = re.sub(r'\n\s*\n+', '\n\n', text)
+        
+        return text.strip()
 
 

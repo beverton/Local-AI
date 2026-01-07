@@ -95,32 +95,16 @@ class WhisperManager:
             )
             
             dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
-            # #region agent log
-            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H3","location":"whisper_manager.py:96","message":"Setting dtype for model load","data":{"dtype":str(dtype),"device":self.device},"timestamp":int(time.time()*1000)})+"\n")
-            # #endregion
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 model_path,
                 dtype=dtype,  # Verwende dtype statt torch_dtype (Deprecation-Warnung behoben)
                 local_files_only=True
             )
             
-            # #region agent log
-            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                first_param_dtype = str(next(self.model.parameters()).dtype) if self.model.parameters() else "unknown"
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"whisper_manager.py:104","message":"Model dtype after from_pretrained","data":{"first_param_dtype":first_param_dtype,"expected_dtype":str(dtype)},"timestamp":int(time.time()*1000)})+"\n")
-            # #endregion
-            
             # Auf Device verschieben
             self.model = self.model.to(self.device)
             
-            # #region agent log
-            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                first_param_after = next(self.model.parameters())
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H2","location":"whisper_manager.py:107","message":"Model dtype after to(device)","data":{"dtype":str(first_param_after.dtype),"device":str(first_param_after.device)},"timestamp":int(time.time()*1000)})+"\n")
-            # #endregion
-            
-            # GPU-Optimierungen
+            ## GPU-Optimierungen
             if self.device == "cuda":
                 logger.info("Aktiviere GPU-Optimierungen für Whisper...")
                 # Setze Modell in Evaluation-Modus
@@ -177,23 +161,10 @@ class WhisperManager:
                 return_tensors="pt"
             )
             
-            # #region agent log
-            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                input_features_dtype = str(inputs["input_features"].dtype) if "input_features" in inputs else "missing"
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H1","location":"whisper_manager.py:161","message":"Input dtype from processor","data":{"input_features_dtype":input_features_dtype},"timestamp":int(time.time()*1000)})+"\n")
-            # #endregion
-            
-            # Auf Device verschieben
+            ## Auf Device verschieben
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # #region agent log
-            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                input_features_after = inputs.get("input_features")
-                model_first_param = next(self.model.parameters())
-                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H1","location":"whisper_manager.py:167","message":"Dtype comparison before generate","data":{"input_dtype":str(input_features_after.dtype) if input_features_after is not None else "none","model_param_dtype":str(model_first_param.dtype),"match":str(input_features_after.dtype) == str(model_first_param.dtype) if input_features_after is not None else False},"timestamp":int(time.time()*1000)})+"\n")
-            # #endregion
-            
-            # Transkribieren
+            ## Transkribieren
             with torch.no_grad():
                 # Sprache setzen wenn angegeben
                 generate_kwargs = {
@@ -223,25 +194,9 @@ class WhisperManager:
                         logger.warning(f"Inputs sind auf {input_device}, sollten auf CUDA sein")
                         inputs = {k: v.to(self.device) for k, v in inputs.items()}
                     
-                    # #region agent log
-                    with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                        model_dtype = str(next(self.model.parameters()).dtype)
-                        input_dtype = str(inputs["input_features"].dtype)
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"whisper_manager.py:195","message":"Before generate - dtype check","data":{"model_dtype":model_dtype,"input_dtype":input_dtype,"needs_conversion":input_dtype != model_dtype},"timestamp":int(time.time()*1000)})+"\n")
-                    # #endregion
-                    
                     # Konvertiere Inputs zu Model-Dtype falls nötig
                     if inputs["input_features"].dtype != next(self.model.parameters()).dtype:
-                        # #region agent log
-                        with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H4","location":"whisper_manager.py:200","message":"Converting inputs to model dtype","data":{"from":str(inputs["input_features"].dtype),"to":str(next(self.model.parameters()).dtype)},"timestamp":int(time.time()*1000)})+"\n")
-                        # #endregion
                         inputs["input_features"] = inputs["input_features"].to(next(self.model.parameters()).dtype)
-                
-                # #region agent log
-                with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"H5","location":"whisper_manager.py:204","message":"About to call generate","data":{"input_dtype":str(inputs["input_features"].dtype),"model_dtype":str(next(self.model.parameters()).dtype)},"timestamp":int(time.time()*1000)})+"\n")
-                # #endregion
                 
                 generated_ids = self.model.generate(
                     inputs["input_features"],

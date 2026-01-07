@@ -6,6 +6,7 @@ import sys
 import os
 import logging
 import subprocess
+import time
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from concurrent.futures import ThreadPoolExecutor
@@ -144,39 +145,47 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
 def save_generated_image(image: Image.Image, prompt: str, temp_dir: Optional[str] = None) -> Optional[str]:
     """
     Speichert ein generiertes Bild mit Timestamp und Prompt im Dateinamen.
+    Verwendet Output Manager für konfigurierbare Pfade und Dateinamen.
     
     Args:
         image: Das PIL Image
         prompt: Der Prompt-Text für den Dateinamen
-        temp_dir: Optionales Temp-Verzeichnis (wird aus Config geladen wenn None)
+        temp_dir: Optionales Temp-Verzeichnis (deprecated, wird ignoriert)
         
     Returns:
         Pfad zur gespeicherten Datei oder None bei Fehler
     """
     try:
-        if temp_dir is None:
-            temp_dir = get_temp_directory()
+        # Verwende Output Manager für organisierte Speicherung
+        from output_manager import get_output_manager
+        output_mgr = get_output_manager()
         
-        # Erstelle Unterordner für generierte Bilder
-        images_dir = os.path.join(temp_dir, "generated_images")
-        os.makedirs(images_dir, exist_ok=True)
-        
-        # Erstelle Dateinamen: timestamp_sanitized_prompt.png
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        sanitized_prompt = sanitize_filename(prompt, max_length=50)
-        filename = f"{timestamp}_{sanitized_prompt}.png"
-        
-        # Vollständiger Pfad
-        file_path = os.path.join(images_dir, filename)
+        # Generiere Output-Pfad mit automatischem Titel und Datum
+        filepath = output_mgr.get_image_output_path(prompt=prompt, extension="png")
         
         # Speichere Bild
-        image.save(file_path, format="PNG")
-        logger.info(f"Bild gespeichert: {file_path}")
-        return file_path
+        image.save(str(filepath), format="PNG", optimize=True)
+        logger.info(f"Bild gespeichert: {filepath}")
+        return str(filepath)
         
     except Exception as e:
-        logger.warning(f"Fehler beim Speichern des Bildes: {e}")
-        return None
+        logger.warning(f"Fehler beim Speichern des Bildes (Output Manager): {e}")
+        # Fallback zum alten Verhalten
+        try:
+            if temp_dir is None:
+                temp_dir = get_temp_directory()
+            images_dir = os.path.join(temp_dir, "generated_images")
+            os.makedirs(images_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            sanitized_prompt = sanitize_filename(prompt, max_length=50)
+            filename = f"{timestamp}_{sanitized_prompt}.png"
+            file_path = os.path.join(images_dir, filename)
+            image.save(file_path, format="PNG")
+            logger.info(f"Bild gespeichert (Fallback): {file_path}")
+            return file_path
+        except Exception as fallback_error:
+            logger.warning(f"Auch Fallback fehlgeschlagen: {fallback_error}")
+            return None
 
 # Model-Service-Client initialisieren
 model_service_client = ModelServiceClient(host=model_service_host, port=model_service_port)
@@ -284,6 +293,7 @@ def set_agent_managers(agent_instance):
     """Setzt die Manager für einen Agent"""
     agent_instance.set_model_manager(model_manager)
     agent_instance.set_agent_manager(agent_manager)
+    agent_instance.set_model_service_client(model_service_client)  # Model Service Client hinzufügen
     if image_manager:
         agent_instance.set_image_manager(image_manager)
 
@@ -327,6 +337,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     max_length: int = 2048
     temperature: float = 0.7
+    language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en") - wenn None, wird aus speech_input_app/config.json gelesen
 
 
 class SetConversationModelRequest(BaseModel):
@@ -477,23 +488,34 @@ async def get_system_stats():
     if torch.cuda.is_available():
         try:
             stats["gpu_name"] = torch.cuda.get_device_name(0)
-            stats["gpu_memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**2), 0)
-            stats["gpu_memory_used_mb"] = round(torch.cuda.memory_allocated(0) / (1024**2), 0)
-            stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
             
-            # GPU-Auslastung via nvidia-smi (falls verfügbar)
+            # Nutze nvidia-smi für EXAKTE GPU-Speicher-Messung
+            # (torch.cuda.memory_allocated zeigt nur PyTorch-Allokationen, nicht tatsächlichen VRAM)
             try:
                 import subprocess
                 result = subprocess.run(
-                    ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'],
+                    ['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'],
                     capture_output=True,
                     text=True,
                     timeout=2
                 )
                 if result.returncode == 0:
-                    stats["gpu_utilization"] = int(result.stdout.strip())
-            except:
-                pass
+                    values = result.stdout.strip().split(',')
+                    stats["gpu_memory_used_mb"] = float(values[0].strip())
+                    stats["gpu_memory_total_mb"] = float(values[1].strip())
+                    stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
+                    stats["gpu_utilization"] = int(values[2].strip())
+                else:
+                    # Fallback auf PyTorch (ungenau)
+                    stats["gpu_memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**2), 0)
+                    stats["gpu_memory_used_mb"] = round(torch.cuda.memory_reserved(0) / (1024**2), 0)  # memory_reserved statt memory_allocated
+                    stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
+            except Exception as smi_error:
+                # Fallback auf PyTorch (ungenau)
+                logger.debug(f"nvidia-smi nicht verfügbar, verwende PyTorch-Messung: {smi_error}")
+                stats["gpu_memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**2), 0)
+                stats["gpu_memory_used_mb"] = round(torch.cuda.memory_reserved(0) / (1024**2), 0)  # memory_reserved statt memory_allocated
+                stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
         except Exception as e:
             logger.warning(f"Fehler beim Abrufen der GPU-Informationen: {e}")
     
@@ -709,13 +731,39 @@ async def chat_stream(request: ChatRequest):
     # Lade Conversation History
     history = conversation_manager.get_conversation_history(conversation_id)
     
+    # Bestimme Antwort-Sprache (flexibel basierend auf Audiosprache)
+    stream_response_language = request.language
+    if not stream_response_language:
+        # Lese Sprache aus speech_input_app/config.json
+        try:
+            speech_config_path = os.path.join(workspace_root, "speech_input_app", "config.json")
+            if os.path.exists(speech_config_path):
+                with open(speech_config_path, 'r', encoding='utf-8') as f:
+                    speech_config = json.load(f)
+                    stream_response_language = speech_config.get("language", "de")
+            else:
+                stream_response_language = "de"  # Default: Deutsch
+        except Exception as e:
+            logger.warning(f"Fehler beim Lesen der Sprach-Konfiguration: {e}, verwende Deutsch")
+            stream_response_language = "de"
+    
     # Erstelle Messages-Liste
     messages = []
     current_model = model_manager.get_current_model() if not USE_MODEL_SERVICE else model_to_use
+    
+    # Generiere System-Prompt basierend auf Sprache
     if current_model and "phi-3" in current_model.lower():
-        system_prompt = "Du bist ein hilfreicher AI-Assistent."
+        system_prompt = "Du bist ein hilfreicher AI-Assistent." if stream_response_language != "en" else "You are a helpful AI assistant."
+    elif current_model and "mistral" in current_model.lower():
+        if stream_response_language == "en":
+            system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words."
+        else:
+            system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern."
     else:
-        system_prompt = None
+        if stream_response_language == "en":
+            system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English."
+        else:
+            system_prompt = "Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch."
     
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -770,9 +818,57 @@ async def chat_stream(request: ChatRequest):
     # Speichere User-Nachricht
     conversation_manager.add_message(conversation_id, "user", request.message)
     
+    # 🔥 CHATANGENT INTEGRATION - Nutze ChatAgent für Tool-Support (Web-Search etc.)
+    use_chat_agent = True  # Flag um ChatAgent zu aktivieren
+    
     # Streaming-Generator
     async def generate():
         try:
+            # 🔥 CHATANGENT INTEGRATION - Versuche ChatAgent zu nutzen
+            if use_chat_agent:
+                try:
+                    # Erstelle oder hole ChatAgent für diese Conversation
+                    conversation_agents = agent_manager.get_conversation_agents(conversation_id)
+                    chat_agent = None
+                    
+                    # Suche nach existierendem ChatAgent
+                    for agent_info in conversation_agents:
+                        if agent_info.get("type") == "chat_agent":
+                            chat_agent = agent_manager.get_agent(conversation_id, agent_info["id"])
+                            break
+                    
+                    # Erstelle neuen ChatAgent falls nicht vorhanden
+                    if not chat_agent:
+                        agent_id = agent_manager.create_agent(
+                            conversation_id=conversation_id,
+                            agent_type="chat_agent",
+                            model_id=model_to_use,
+                            set_managers_func=set_agent_managers
+                        )
+                        chat_agent = agent_manager.get_agent(conversation_id, agent_id)
+                    
+                    # Nutze ChatAgent für Antwort-Generierung (mit Tools/Web-Search)
+                    response = chat_agent.process_message(request.message)
+                    
+                    # 🔧 FIX: Simuliere Streaming durch Chunks im richtigen Format
+                    # Frontend erwartet {'chunk': '...'}, nicht {'type': 'content', 'content': '...'}
+                    chunk_size = 15  # Zeichen pro Chunk
+                    for i in range(0, len(response), chunk_size):
+                        chunk = response[i:i+chunk_size]
+                        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                    
+                    # Fertig - Frontend prüft auf {'done': True}
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    
+                    # Speichere Assistant-Nachricht
+                    conversation_manager.add_message(conversation_id, "assistant", response)
+                    
+                    # Erfolg - return ohne Fallback
+                    return
+                    
+                except Exception as e:
+                    logger.warning(f"ChatAgent fehlgeschlagen, fallback auf normales Streaming: {e}")
+                    # Fallback auf normalen Streaming-Modus unten
             
             effective_temperature = request.temperature if request.temperature > 0 else 0.3
             
@@ -792,7 +888,6 @@ async def chat_stream(request: ChatRequest):
                         ):
                             full_response += chunk
                             yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                        yield f"data: {json.dumps({'done': True})}\n\n"
                     else:
                         # Fallback: Normale Methode und simuliere Streaming
                         result = model_service_client.chat(
@@ -800,7 +895,8 @@ async def chat_stream(request: ChatRequest):
                             messages=messages,
                             conversation_id=conversation_id,
                             max_length=request.max_length,
-                            temperature=effective_temperature
+                            temperature=effective_temperature,
+                            language=stream_response_language
                         )
                         if result:
                             response = result.get("response", "")
@@ -812,7 +908,6 @@ async def chat_stream(request: ChatRequest):
                                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
                                 # Kleine Verzögerung für bessere UX
                                 await asyncio.sleep(0.01)
-                            yield f"data: {json.dumps({'done': True})}\n\n"
                 except Exception as e:
                     logger.error(f"Fehler bei Streaming mit Model-Service: {e}")
                     # Fallback auf normale Methode
@@ -821,7 +916,8 @@ async def chat_stream(request: ChatRequest):
                         messages=messages,
                         conversation_id=conversation_id,
                         max_length=request.max_length,
-                        temperature=effective_temperature
+                        temperature=effective_temperature,
+                        language=stream_response_language
                     )
                     if result:
                         response = result.get("response", "")
@@ -832,9 +928,7 @@ async def chat_stream(request: ChatRequest):
                             chunk = response[i:i+chunk_size]
                             yield f"data: {json.dumps({'chunk': chunk})}\n\n"
                             await asyncio.sleep(0.01)
-                        yield f"data: {json.dumps({'done': True})}\n\n"
             else:
-                
                 # Lokales Streaming
                 for chunk in model_manager.generate_stream(
                     messages,
@@ -843,13 +937,11 @@ async def chat_stream(request: ChatRequest):
                 ):
                     full_response += chunk
                     yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                yield f"data: {json.dumps({'done': True})}\n\n"
             
             # Speichere vollständige Antwort
             if full_response:
                 conversation_manager.add_message(conversation_id, "assistant", full_response)
         except Exception as e:
-            
             logger.error(f"Fehler bei Streaming: {e}")
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
     
@@ -861,8 +953,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """
     Chat-Endpunkt - verarbeitet eine Nachricht und gibt eine Antwort zurück
     """
-    
-    # Conversation ID prüfen/erstellen
+    ## Conversation ID prüfen/erstellen
     conversation_id = request.conversation_id
     if not conversation_id:
         conversation_id = conversation_manager.create_conversation(conversation_type="chat")
@@ -931,73 +1022,70 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             }
         )
     
-    # Prüfe File-Mode (nur Datei-Operationen)
-    # Web-Search ist immer aktiv über Quality Management
-    file_mode_enabled = conversation_manager.get_file_mode(conversation_id)
-    
-    # Wenn File-Mode aktiviert, nutze ChatAgent für Datei-Operationen
-    if file_mode_enabled:
-        try:
-            # Stelle sicher dass Modell geladen ist
-            if USE_MODEL_SERVICE:
-                status = model_service_client.get_text_model_status()
-                if not (status and status.get("loaded") and status.get("model_id") == model_to_use):
-                    if not model_service_client.load_text_model(model_to_use):
-                        raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Modells: {model_to_use}")
-            else:
-                model_ready = await ensure_text_model_loaded(model_to_use, conversation_id)
-                if not model_ready:
-                    raise HTTPException(
-                        status_code=202,
-                        detail={
-                            "status": "model_loading",
-                            "message": f"Modell {model_to_use} wird geladen. Bitte warten Sie.",
-                            "model_id": model_to_use,
-                            "conversation_id": conversation_id
-                        }
-                    )
-            
-            # Erstelle oder hole ChatAgent für diese Conversation
-            conversation_agents = agent_manager.get_conversation_agents(conversation_id)
-            chat_agent = None
-            
-            # Suche nach existierendem ChatAgent
-            for agent_info in conversation_agents:
-                if agent_info.get("type") == "chat_agent":
-                    chat_agent = agent_manager.get_agent(conversation_id, agent_info["id"])
-                    break
-            
-            # Erstelle neuen ChatAgent falls nicht vorhanden
-            if not chat_agent:
-                agent_id = agent_manager.create_agent(
-                    conversation_id=conversation_id,
-                    agent_type="chat_agent",
-                    model_id=model_to_use,
-                    set_managers_func=set_agent_managers
+    # IMMER ChatAgent verwenden - alle Chats sind jetzt Agenten mit Tool-Unterstützung
+    # ChatAgent erkennt automatisch Tool-Bedarf (WebSearch, Datei-Operationen, etc.)
+    try:
+        # Stelle sicher dass Modell geladen ist
+        if USE_MODEL_SERVICE:
+            status = model_service_client.get_text_model_status()
+            if not (status and status.get("loaded") and status.get("model_id") == model_to_use):
+                if not model_service_client.load_text_model(model_to_use):
+                    raise HTTPException(status_code=500, detail=f"Fehler beim Laden des Modells: {model_to_use}")
+        else:
+            model_ready = await ensure_text_model_loaded(model_to_use, conversation_id)
+            if not model_ready:
+                raise HTTPException(
+                    status_code=202,
+                    detail={
+                        "status": "model_loading",
+                        "message": f"Modell {model_to_use} wird geladen. Bitte warten Sie.",
+                        "model_id": model_to_use,
+                        "conversation_id": conversation_id
+                    }
                 )
-                chat_agent = agent_manager.get_agent(conversation_id, agent_id)
-            
-            # Nutze ChatAgent für Antwort-Generierung
-            response = chat_agent.process_message(request.message)
-            
-            # Speichere Nachrichten
-            conversation_manager.add_message(conversation_id, "user", request.message)
-            conversation_manager.add_message(conversation_id, "assistant", response)
-            
-            # Lerne aus Conversation (wenn aktiviert)
-            if preference_learner.is_enabled():
-                all_messages = conversation_manager.get_conversation_history(conversation_id)
-                preference_learner.learn_from_conversation(all_messages)
-            
-            return ChatResponse(response=response, conversation_id=conversation_id)
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Fehler bei Agent-Modus: {e}")
-            # Fallback auf normalen Chat-Modus bei Fehler
-            logger.warning("Fallback auf normalen Chat-Modus")
-            file_mode_enabled = False
+        
+        # Erstelle oder hole ChatAgent für diese Conversation
+        conversation_agents = agent_manager.get_conversation_agents(conversation_id)
+        chat_agent = None
+        
+        # Suche nach existierendem ChatAgent
+        for agent_info in conversation_agents:
+            if agent_info.get("type") == "chat_agent":
+                chat_agent = agent_manager.get_agent(conversation_id, agent_info["id"])
+                break
+        
+        # Erstelle neuen ChatAgent falls nicht vorhanden
+        if not chat_agent:
+            agent_id = agent_manager.create_agent(
+                conversation_id=conversation_id,
+                agent_type="chat_agent",
+                model_id=model_to_use,
+                set_managers_func=set_agent_managers
+            )
+            chat_agent = agent_manager.get_agent(conversation_id, agent_id)
+        
+        # Nutze ChatAgent für Antwort-Generierung
+        response = chat_agent.process_message(request.message)
+        
+        # Speichere Nachrichten
+        conversation_manager.add_message(conversation_id, "user", request.message)
+        conversation_manager.add_message(conversation_id, "assistant", response)
+        
+        # Lerne aus Conversation (wenn aktiviert)
+        if preference_learner.is_enabled():
+            all_messages = conversation_manager.get_conversation_history(conversation_id)
+            preference_learner.learn_from_conversation(all_messages)
+        
+        return ChatResponse(response=response, conversation_id=conversation_id)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Fehler bei ChatAgent: {e}")
+        logger.exception("Detaillierter Fehler:")
+        ## Fallback auf normalen Chat-Modus bei Fehler
+        logger.warning("Fallback auf normalen Chat-Modus (ohne Agent)")
+        # Weiter mit normalem Flow unten
     
     # Lade Conversation History
     history = conversation_manager.get_conversation_history(conversation_id)
@@ -1005,17 +1093,46 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     # Erstelle Messages-Liste für Chat-Format
     messages = []
     
-    # System-Prompt (mit Präferenzen wenn aktiviert)
-    current_model = model_manager.get_current_model()
+    # Bestimme Antwort-Sprache (flexibel basierend auf Audiosprache)
+    response_language = request.language
+    if not response_language:
+        # Lese Sprache aus speech_input_app/config.json
+        try:
+            speech_config_path = os.path.join(workspace_root, "speech_input_app", "config.json")
+            if os.path.exists(speech_config_path):
+                with open(speech_config_path, 'r', encoding='utf-8') as f:
+                    speech_config = json.load(f)
+                    response_language = speech_config.get("language", "de")
+                    logger.info(f"Sprache aus config.json gelesen: {response_language}")
+            else:
+                response_language = "de"  # Default: Deutsch
+                logger.warning("speech_input_app/config.json nicht gefunden, verwende Deutsch")
+        except Exception as e:
+            logger.warning(f"Fehler beim Lesen der Sprach-Konfiguration: {e}, verwende Deutsch")
+            response_language = "de"
+    
+    ## System-Prompt (mit Präferenzen wenn aktiviert)
+    # WICHTIG: Verwende model_to_use (bereits bestimmt oben), nicht model_manager.get_current_model()
+    # da bei USE_MODEL_SERVICE das Modell im Model-Service läuft, nicht lokal
+    current_model = model_to_use  # Verwende bereits bestimmtes Modell
+    
+    # Generiere System-Prompt basierend auf Sprache
     if current_model and "phi-3" in current_model.lower():
         # Phi-3 verwendet ChatML-Format, kein separater System-Prompt nötig
         system_prompt = None
     elif current_model and "mistral" in current_model.lower():
-        # Mistral: Kürzerer, präziserer Prompt
-        system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
+        # Mistral: Sprachspezifischer Prompt
+        if response_language == "en":
+            system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words. Answer ONLY the asked question, no additional explanations or technical details."
+        else:  # Deutsch (de) oder andere
+            system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
         system_prompt = preference_learner.get_system_prompt(system_prompt)
     else:
-        system_prompt = "Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten. Generiere KEINE weiteren User- oder Assistant-Nachrichten."
+        # Andere Modelle: Sprachspezifischer Prompt
+        if response_language == "en":
+            system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English. IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages. Do NOT generate additional user or assistant messages."
+        else:  # Deutsch (de) oder andere
+            system_prompt = "Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten. Generiere KEINE weiteren User- oder Assistant-Nachrichten."
         system_prompt = preference_learner.get_system_prompt(system_prompt)
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -1080,7 +1197,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     # Logge Messages (Memory 4468610)
     logger.info(f"Messages: {len(messages)} Nachrichten")
     
-    # Generiere Antwort
+    ## Generiere Antwort
     try:
         # Verwende niedrigere Temperature standardmäßig für bessere Qualität
         effective_temperature = request.temperature if request.temperature > 0 else 0.3
@@ -1096,7 +1213,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                         messages=messages,  # Sende vollständige Messages-Liste
                         conversation_id=conversation_id,
                         max_length=request.max_length,
-                        temperature=effective_temperature
+                        temperature=effective_temperature,
+                        language=response_language  # Sende Sprache mit
                     )
                 except Exception as e:
                     logger.error(f"Fehler bei Model-Service Chat im Thread: {e}")
@@ -1109,8 +1227,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
             if result:
                 response = result.get("response", "")
-            else:
-                raise HTTPException(status_code=500, detail="Fehler bei Chat-Request an Model-Service")
+                #else:
+                #raise HTTPException(status_code=500, detail="Fehler bei Chat-Request an Model-Service")
         else:
             # Fallback: Nutze lokale Manager
             # WICHTIG: Generierung in Thread Pool ausführen (blockiert Event Loop nicht)
@@ -1135,75 +1253,9 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # Logge Response
         logger.info(f"Response: {response[:200]}...")
         
-        # FINALE BEREINIGUNG: Einfache Methode - finde "assistant" und nimm nur den Inhalt danach
-        cleaned_response = response
-        
-        # Methode 1: Suche nach "assistant" Marker
-        response_lower = cleaned_response.lower()
-        assistant_markers = ["assistant ", "assistant:", "assistant\n"]
-        assistant_pos = -1
-        
-        for marker in assistant_markers:
-            pos = response_lower.find(marker)
-            if pos != -1:
-                assistant_pos = pos + len(marker)
-                break
-        
-        if assistant_pos > 0:
-            cleaned_response = cleaned_response[assistant_pos:].strip()
-            logger.info("Response nach 'assistant' Marker extrahiert")
-        else:
-            # Methode 2: Zeilenweise durchgehen
-            lines = cleaned_response.split('\n')
-            final_lines = []
-            found_assistant = False
-            
-            for line in lines:
-                line_stripped = line.strip()
-                line_lower = line_stripped.lower()
-                
-                # Wenn wir "assistant" finden, nimm nur den Inhalt danach
-                if line_lower.startswith('assistant'):
-                    found_assistant = True
-                    content = line_stripped.split(':', 1)[-1].strip() if ':' in line_stripped else line_stripped[9:].strip()
-                    if content:
-                        final_lines.append(content)
-                    continue
-                
-                # Überspringe System/User-Zeilen
-                if not found_assistant:
-                    if (line_lower.startswith('system ') or 
-                        line_lower.startswith('user ') or
-                        "du bist ein hilfreicher" in line_lower):
-                        continue
-                
-                # Nach "assistant": Füge alle Zeilen hinzu außer weitere Markierungen
-                if found_assistant:
-                    if not (line_lower.startswith('system ') or line_lower.startswith('user ')):
-                        final_lines.append(line)
-                else:
-                    # Vor "assistant": Nur Zeilen ohne System/User-Markierungen
-                    final_lines.append(line)
-            
-            cleaned_response = '\n'.join(final_lines).strip()
-        
-        # Entferne System-Prompt-Phrasen falls noch vorhanden
-        system_keywords = ["du bist ein hilfreicher", "ai-assistent", "antworte klar und direkt"]
-        for keyword in system_keywords:
-            if keyword in cleaned_response.lower():
-                lines = cleaned_response.split('\n')
-                cleaned_response = '\n'.join([l for l in lines if keyword.lower() not in l.lower()]).strip()
-        
-        # Entferne User-Nachricht falls noch vorhanden
-        if request.message in cleaned_response:
-            cleaned_response = cleaned_response.replace(request.message, "").strip()
-        
-        # Entferne führende "assistant" falls noch vorhanden
-        if cleaned_response.lower().startswith('assistant'):
-            cleaned_response = cleaned_response.split(':', 1)[-1].strip() if ':' in cleaned_response else cleaned_response[9:].strip()
-        
-        # Verwende bereinigte Response für Quality Management
-        response = cleaned_response
+        # HINWEIS: Response-Bereinigung erfolgt bereits in model_manager.generate()
+        # Keine doppelte Bereinigung hier - das würde gültige Antworten beschädigen
+        # Die Response ist bereits vollständig bereinigt und bereit für Quality Management
         
         # Quality Management (nutzt automatisch Web-Search wenn nötig) - für ALLE Chat-Modelle
         # Funktioniert mit Qwen, Phi-3, Mistral, etc. - modellunabhängig
@@ -1825,6 +1877,77 @@ async def set_audio_settings(request: AudioSettingsRequest):
     return AudioSettingsResponse(**settings)
 
 
+# Output Settings Endpoints
+class OutputSettingsRequest(BaseModel):
+    base_directory: Optional[str] = None
+    use_date_folders: Optional[bool] = None
+    filename_format: Optional[str] = None
+
+class OutputSettingsResponse(BaseModel):
+    base_directory: str
+    images_subdir: str
+    conversations_subdir: str
+    audio_subdir: str
+    use_date_folders: bool
+    filename_format: str
+
+@app.get("/output/settings", response_model=OutputSettingsResponse)
+async def get_output_settings():
+    """Gibt die aktuellen Output-Einstellungen zurück"""
+    try:
+        from output_manager import get_output_manager
+        output_mgr = get_output_manager()
+        
+        return OutputSettingsResponse(
+            base_directory=output_mgr.base_directory,
+            images_subdir=output_mgr.images_subdir,
+            conversations_subdir=output_mgr.conversations_subdir,
+            audio_subdir=output_mgr.audio_subdir,
+            use_date_folders=output_mgr.use_date_folders,
+            filename_format=output_mgr.filename_format
+        )
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der Output-Einstellungen: {e}")
+        # Fallback-Defaults
+        return OutputSettingsResponse(
+            base_directory="G:\\KI Modelle\\Outputs",
+            images_subdir="generated_images",
+            conversations_subdir="conversations",
+            audio_subdir="audio",
+            use_date_folders=True,
+            filename_format="{date}_{title}"
+        )
+
+@app.post("/output/settings", response_model=OutputSettingsResponse)
+async def update_output_settings(request: OutputSettingsRequest):
+    """Aktualisiert Output-Einstellungen"""
+    try:
+        from output_manager import get_output_manager
+        output_mgr = get_output_manager()
+        
+        # Aktualisiere Settings
+        success = output_mgr.update_config(
+            base_directory=request.base_directory,
+            use_date_folders=request.use_date_folders,
+            filename_format=request.filename_format
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Fehler beim Speichern der Einstellungen")
+        
+        return OutputSettingsResponse(
+            base_directory=output_mgr.base_directory,
+            images_subdir=output_mgr.images_subdir,
+            conversations_subdir=output_mgr.conversations_subdir,
+            audio_subdir=output_mgr.audio_subdir,
+            use_date_folders=output_mgr.use_date_folders,
+            filename_format=output_mgr.filename_format
+        )
+    except Exception as e:
+        logger.error(f"Fehler beim Aktualisieren der Output-Einstellungen: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/image/models")
 async def get_image_models():
     """Gibt alle verfügbaren Bildgenerierungsmodelle zurück"""
@@ -2299,7 +2422,13 @@ async def generate_image(request: GenerateImageRequest):
                 if image_manager:
                     available_models = image_manager.get_available_models()
                     if available_models:
-                        model_to_use = list(available_models.keys())[0]
+                        # Versuche zuerst default_model aus image_generation config zu verwenden
+                        default_image_model = config.get("image_generation", {}).get("default_model")
+                        if default_image_model and default_image_model in available_models:
+                            model_to_use = default_image_model
+                        else:
+                            # Fallback: Erstes verfügbares Modell
+                            model_to_use = list(available_models.keys())[0]
                     else:
                         raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell geladen und kein Modell verfügbar")
                 else:
@@ -2313,7 +2442,13 @@ async def generate_image(request: GenerateImageRequest):
                 if image_manager:
                     available_models = image_manager.get_available_models()
                     if available_models:
-                        model_to_use = list(available_models.keys())[0]
+                        # Versuche zuerst default_model aus image_generation config zu verwenden
+                        default_image_model = config.get("image_generation", {}).get("default_model")
+                        if default_image_model and default_image_model in available_models:
+                            model_to_use = default_image_model
+                        else:
+                            # Fallback: Erstes verfügbares Modell
+                            model_to_use = list(available_models.keys())[0]
                     else:
                         raise HTTPException(status_code=400, detail="Kein Bildgenerierungsmodell geladen und kein Modell verfügbar")
                 else:
@@ -2355,10 +2490,9 @@ async def generate_image(request: GenerateImageRequest):
         
         # Prüfe dynamisch ob Model-Service verfügbar ist
         use_model_service = check_model_service_available()
-        
-        # Generiere Bild
+        ## Generiere Bild
         if use_model_service:
-            # Nutze Model-Service
+            ## Nutze Model-Service
             result = model_service_client.generate_image(
                 prompt=request.prompt,
                 negative_prompt=request.negative_prompt,

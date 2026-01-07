@@ -339,6 +339,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     max_length: int = 2048
     temperature: float = 0.7
+    language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en")
 
 
 class TranscribeRequest(BaseModel):
@@ -899,6 +900,27 @@ async def chat(request: ChatRequest, http_request: Request):
             messages = request.messages
         else:
             messages = [{"role": "user", "content": request.message}]
+        
+        # Stelle sicher, dass System-Prompt vorhanden ist (wenn nicht bereits in messages)
+        has_system = any(m.get("role") == "system" for m in messages)
+        if not has_system:
+            # Bestimme Antwort-Sprache
+            response_language = request.language or "de"  # Default: Deutsch
+            
+            # Generiere System-Prompt basierend auf Sprache und Modell
+            if "mistral" in model_id.lower():
+                if response_language == "en":
+                    system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words. Answer ONLY the asked question, no additional explanations or technical details."
+                else:  # Deutsch (de) oder andere
+                    system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
+            else:
+                if response_language == "en":
+                    system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English. IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."
+                else:  # Deutsch (de) oder andere
+                    system_prompt = "Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."
+            
+            # Füge System-Prompt am Anfang hinzu
+            messages.insert(0, {"role": "system", "content": system_prompt})
         
         response_text = model_manager.generate(
             messages,

@@ -1,0 +1,31 @@
+{
+  "id": "a679e1aa-46dc-4e8b-ab48-9f8656ba2958",
+  "title": "wer ist der bundeskanzler von deutschland?",
+  "created_at": "2026-01-07T22:26:00.915109",
+  "updated_at": "2026-01-07T22:51:06.447093",
+  "messages": [
+    {
+      "role": "user",
+      "content": "wer ist der bundeskanzler von deutschland?",
+      "timestamp": "2026-01-07T22:26:00.920108"
+    },
+    {
+      "role": "assistant",
+      "content": "\n\nLink: https://www.google.com/search?q=der%20bundeskanzler%20von%20deutschland",
+      "timestamp": "2026-01-07T22:28:01.894927"
+    },
+    {
+      "role": "user",
+      "content": "wo kann man in trier erdbeeren kaufen. suche einen Hofladen",
+      "timestamp": "2026-01-07T22:49:05.265357"
+    },
+    {
+      "role": "assistant",
+      "content": "\n\nLink: https://www.google.com/search?q=einen%20hofladen",
+      "timestamp": "2026-01-07T22:51:06.447088"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

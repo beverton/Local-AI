@@ -77,66 +77,26 @@ def _load_diffusers():
     if DIFFUSERS_AVAILABLE is not None:
         return DIFFUSERS_AVAILABLE
     
-    # #region agent log
     try:
-        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-        with open(log_path, 'a', encoding='utf-8') as f:
-            import json
-            log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:33","message":"_load_diffusers gestartet","data":{"hf_home":os.environ.get("HF_HOME"),"temp_dir":_temp_dir,"transformers_cache":os.environ.get("TRANSFORMERS_CACHE"),"tmp":os.environ.get("TMP"),"tmpdir":os.environ.get("TMPDIR")},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-            f.write(log_entry)
-    except: pass
-    # #endregion
-    
-    try:
+        # Disable Triton (not available on Windows) - muss VOR Import gesetzt werden
+        os.environ['DISABLE_TRITON'] = '1'
+        os.environ['TRITON_DISABLE'] = '1'
+        os.environ['XFORMERS_FORCE_DISABLE_TRITON'] = '1'
+        
         # Versuche diffusers zu importieren
         import warnings
         import sys
-        
-        # #region agent log
-        try:
-            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-            with open(log_path, 'a', encoding='utf-8') as f:
-                import json
-                log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:42","message":"Vor diffusers Import","data":{},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                f.write(log_entry)
-        except: pass
-        # #endregion
         
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
             from diffusers import DiffusionPipeline as DP
             DiffusionPipeline = DP
             DIFFUSERS_AVAILABLE = True
-            
-            # #region agent log
-            try:
-                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    import json
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:50","message":"diffusers Import erfolgreich","data":{},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            
-            if USE_XFORMERS:
-                logger.info("Diffusers erfolgreich geladen")
-            else:
-                logger.info("Diffusers erfolgreich geladen (xformers umgangen)")
+            logger.info("Diffusers erfolgreich geladen")
             return True
-                
     except Exception as e:
         import traceback
         error_str = str(e).lower()
-        
-        # #region agent log
-        try:
-            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-            with open(log_path, 'a', encoding='utf-8') as f:
-                import json
-                log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:56","message":"diffusers Import fehlgeschlagen","data":{"error":str(e),"error_type":type(e).__name__,"error_str":error_str,"has_triton":"triton" in error_str,"traceback":traceback.format_exc()},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                f.write(log_entry)
-        except: pass
-        # #endregion
         
         if 'xformers' in error_str or 'dll load failed' in error_str:
             logger.error(f"Diffusers konnte nicht geladen werden wegen xformers: {e}")
@@ -300,16 +260,6 @@ class ImageManager:
             ImageManager._loading_instances[current_thread_id] = self.instance_id
         
         try:
-            # #region agent log
-            try:
-                import importlib.util
-                has_sentencepiece = importlib.util.find_spec('sentencepiece') is not None
-                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    import json
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:123","message":"load_model aufgerufen","data":{"model_id":model_id,"has_sentencepiece":has_sentencepiece,"diffusers_available":DIFFUSERS_AVAILABLE},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
             if not _load_diffusers():
                 logger.error("Diffusers ist nicht verfügbar. Bitte installieren Sie diffusers und xformers korrekt.")
                 return False
@@ -374,69 +324,13 @@ class ImageManager:
                 except Exception as e:
                     logger.warning(f"Konnte CUDA-Version nicht prüfen: {e}")
             
-            # #region agent log
-            try:
-                import json
-                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:170","message":"Vor DiffusionPipeline.from_pretrained","data":{"model_id":model_id,"model_path":model_path,"device":self.device,"thread_id":threading.current_thread().ident,"thread_name":threading.current_thread().name,"cuda_info":cuda_version_info},"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,D,E"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            
-            # Pipeline laden
+            ## Pipeline laden
             # Flux-Modelle verwenden DiffusionPipeline
             try:
                 # FluxPipeline unterstützt dtype-Parameter nicht direkt
                 # Das Modell wird mit Standard-dtype geladen und dann auf GPU verschoben
                 
-                # #region agent log
-                try:
-                    import json, time, os as os_module
-                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                    mem_data = {}
-                    if psutil:
-                        try:
-                            process = psutil.Process()
-                            mem_info = process.memory_info()
-                            mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                            mem_data["cpu_mem_vms_gb"] = mem_info.vms/1024**3
-                        except: pass
-                    gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                    gpu_mem_reserved = torch.cuda.memory_reserved(0) / 1024**3 if torch.cuda.is_available() else 0
-                    mem_data.update({"gpu_mem_alloc_gb":gpu_mem_alloc,"gpu_mem_reserved_gb":gpu_mem_reserved,"gpu_total_gb":torch.cuda.get_device_properties(0).total_memory/1024**3 if torch.cuda.is_available() else 0})
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:271","message":"Vor from_pretrained - Memory Check","data":{"model_path":model_path,"device":self.device,"thread_id":threading.current_thread().ident,"thread_name":threading.current_thread().name,**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-                
-                # #region agent log
-                try:
-                    import json, time, os as os_module
-                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                    model_files = []
-                    if os_module.path.exists(model_path):
-                        for root, dirs, files in os_module.walk(model_path):
-                            for file in files[:10]:  # First 10 files
-                                model_files.append(os_module.path.join(root, file))
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:272","message":"Model File Check","data":{"model_path":model_path,"path_exists":os_module.path.exists(model_path),"file_count_sample":len(model_files),"sample_files":model_files[:5]},"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-                
-                # #region agent log
-                try:
-                    import json, time
-                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:273","message":"Threading Check","data":{"thread_id":threading.current_thread().ident,"thread_name":threading.current_thread().name,"active_threads":threading.active_count(),"loading_instances":dict(ImageManager._loading_instances),"instance_id":self.instance_id},"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-                
-                # Unterdrücke triton-Warnungen während des Ladens
+                #### Unterdrücke triton-Warnungen während des Ladens
                 import warnings
                 # os ist bereits oben importiert, kein lokaler Import nötig
                 # Setze Umgebungsvariable um triton-Fehler zu vermeiden
@@ -450,27 +344,7 @@ class ImageManager:
                     torch.cuda.empty_cache()
                     logger.info("GPU-Cache geleert, bereit für Modell-Laden")
                     
-                    # #region agent log
-                    try:
-                        import json, time
-                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                        mem_data = {}
-                        if psutil:
-                            try:
-                                process = psutil.Process()
-                                mem_info = process.memory_info()
-                                mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                            except: pass
-                        gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3
-                        gpu_mem_reserved = torch.cuda.memory_reserved(0) / 1024**3
-                        mem_data.update({"gpu_mem_alloc_gb":gpu_mem_alloc,"gpu_mem_reserved_gb":gpu_mem_reserved})
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:294","message":"Nach GPU Cache Clear","data":mem_data,"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                            f.write(log_entry)
-                    except: pass
-                    # #endregion
-                
-                # Versuche zuerst mit Standard-Parameters
+                    ## Versuche zuerst mit Standard-Parameters
                 # Flux unterstützt kein trust_remote_code und kein dtype-Parameter, also weglassen
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=".*triton.*")
@@ -485,33 +359,12 @@ class ImageManager:
                         "local_files_only": True  # Nur lokale Dateien verwenden - verhindert Download-Abstürze
                     }
                     
-                    # #region agent log
-                    try:
-                        import json, time
-                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:315","message":"Rufe DiffusionPipeline.from_pretrained auf","data":{"model_path":model_path,"load_kwargs":load_kwargs,"thread_id":threading.current_thread().ident},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,D"}) + '\n'
-                            f.write(log_entry)
-                    except: pass
-                    # #endregion
-                    
-                    # Lade Pipeline ohne dtype-Parameter (FluxPipeline unterstützt ihn nicht)
+                    ## Lade Pipeline ohne dtype-Parameter (FluxPipeline unterstützt ihn nicht)
                     # WICHTIG: from_pretrained kann in nativen Code abstürzen (SIGSEGV) oder hängen
                     # Wir verwenden einen Timeout-Mechanismus mit Threading, um Hänger zu erkennen
                     from_pretrained_start_time = time.time()
                     
-                    # #region agent log - Vor dem tatsächlichen Aufruf
-                    try:
-                        import json
-                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:430","message":"UNMITTELBAR VOR from_pretrained Aufruf (mit Timeout)","data":{"model_path":model_path,"thread_id":threading.current_thread().ident,"thread_alive":threading.current_thread().is_alive()},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,D,F"}) + '\n'
-                            f.write(log_entry)
-                            f.flush()  # Force write to disk
-                    except: pass
-                    # #endregion
-                    
-                    # Wrapper-Funktion für from_pretrained mit Timeout
+                    ## Wrapper-Funktion für from_pretrained mit Timeout
                     def _load_pipeline_with_timeout(model_path, load_kwargs, timeout_seconds=300):
                         """Lädt Pipeline in separatem Thread mit Timeout"""
                         result_queue = queue.Queue()
@@ -519,18 +372,7 @@ class ImageManager:
                         
                         def _load_worker():
                             try:
-                                # #region agent log - Thread Start
-                                try:
-                                    import json
-                                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                    with open(log_path, 'a', encoding='utf-8') as f:
-                                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"Load Worker Thread gestartet","data":{"thread_id":threading.current_thread().ident,"thread_name":threading.current_thread().name},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                        f.write(log_entry)
-                                        f.flush()
-                                except: pass
-                                # #endregion
-                                
-                                # Setze Umgebungsvariablen um xformers/Triton zu deaktivieren
+                                ## Setze Umgebungsvariablen um xformers/Triton zu deaktivieren
                                 original_xformers = os.environ.get('XFORMERS_DISABLED', None)
                                 original_triton = os.environ.get('TRITON_DISABLE_LINE_INFO', None)
                                 os.environ['XFORMERS_DISABLED'] = '1'
@@ -538,18 +380,7 @@ class ImageManager:
                                 os.environ['TRITON_DISABLE_LINE_INFO'] = '1'
                                 
                                 try:
-                                    # #region agent log - Vor from_pretrained
-                                    try:
-                                        import json
-                                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                        with open(log_path, 'a', encoding='utf-8') as f:
-                                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"VOR from_pretrained Aufruf im Worker","data":{"model_path":model_path,"thread_id":threading.current_thread().ident},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,F"}) + '\n'
-                                            f.write(log_entry)
-                                            f.flush()
-                                    except: pass
-                                    # #endregion
-                                    
-                                    # Versuche verschiedene Lade-Strategien
+                                    ## Versuche verschiedene Lade-Strategien
                                     # WICHTIG: device_map="cuda" funktioniert für Flux (war die Lösung)
                                     pipeline = None
                                     
@@ -557,149 +388,48 @@ class ImageManager:
                                     try:
                                         logger.info("Versuche Modell direkt auf GPU zu laden (device_map='cuda')...")
                                         
-                                        # #region agent log - Direkt vor from_pretrained mit device_map
-                                        try:
-                                            import json
-                                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                            with open(log_path, 'a', encoding='utf-8') as f:
-                                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"DIREKT VOR from_pretrained - device_map='cuda'","data":{"model_path":model_path},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                f.write(log_entry)
-                                                f.flush()
-                                        except: pass
-                                        # #endregion
-                                        
-                                        # #region agent log - VOR from_pretrained call
-                                        try:
-                                            import json
-                                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                            with open(log_path, 'a', encoding='utf-8') as f:
-                                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"RUFEN from_pretrained AUF - device_map='cuda'","data":{"model_path":model_path,"load_kwargs":load_kwargs},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                f.write(log_entry)
-                                                f.flush()
-                                        except: pass
-                                        # #endregion
+                                        # Verwende SDPA (Scaled Dot Product Attention) statt Triton
+                                        load_kwargs_with_attn = {
+                                            **load_kwargs,
+                                            'use_safetensors': True,
+                                            'variant': None  # Keine spezielle Variante
+                                        }
                                         
                                         pipeline = DiffusionPipeline.from_pretrained(
                                             model_path,
                                             device_map="cuda",
-                                            torch_dtype=torch.bfloat16,
-                                            **load_kwargs
+                                            dtype=torch.float16,  # Geändert zu float16 für bessere Kompatibilität
+                                            **load_kwargs_with_attn
                                         )
-                                        
-                                        # #region agent log - NACH from_pretrained call
-                                        try:
-                                            import json
-                                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                            with open(log_path, 'a', encoding='utf-8') as f:
-                                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"from_pretrained ERFOLGREICH - device_map='cuda'","data":{"pipeline_type":type(pipeline).__name__ if pipeline else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                f.write(log_entry)
-                                                f.flush()
-                                        except: pass
-                                        # #endregion
                                         
                                         logger.info("Modell erfolgreich direkt auf GPU geladen (device_map='cuda')")
                                     except (TypeError, ValueError, RuntimeError) as e:
-                                        # #region agent log - device_map='cuda' Fehler
-                                        try:
-                                            import json, traceback
-                                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                            with open(log_path, 'a', encoding='utf-8') as f:
-                                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"device_map='cuda' Fehler","data":{"error":str(e),"error_type":type(e).__name__,"traceback":traceback.format_exc()},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                f.write(log_entry)
-                                                f.flush()
-                                        except: pass
-                                        # #endregion
-                                        # Strategie 2: Mit low_cpu_mem_usage (lädt in CPU, dann auf GPU)
+                                        ## Strategie 2: Mit low_cpu_mem_usage (lädt in CPU, dann auf GPU)
                                         logger.warning(f"device_map='cuda' nicht unterstützt ({e}), versuche mit low_cpu_mem_usage...")
                                         try:
-                                            # #region agent log - Direkt vor from_pretrained mit low_cpu_mem_usage
-                                            try:
-                                                import json
-                                                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                                with open(log_path, 'a', encoding='utf-8') as f:
-                                                    log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"DIREKT VOR from_pretrained - low_cpu_mem_usage","data":{"model_path":model_path},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                    f.write(log_entry)
-                                                    f.flush()
-                                            except: pass
-                                            # #endregion
-                                            
                                             pipeline = DiffusionPipeline.from_pretrained(
                                                 model_path,
                                                 low_cpu_mem_usage=True,
-                                                torch_dtype=torch.bfloat16,
+                                                dtype=torch.float16,
                                                 **load_kwargs
                                             )
-                                            
-                                            # #region agent log - NACH from_pretrained mit low_cpu_mem_usage
-                                            try:
-                                                import json
-                                                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                                with open(log_path, 'a', encoding='utf-8') as f:
-                                                    log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"from_pretrained ERFOLGREICH - low_cpu_mem_usage","data":{"pipeline_type":type(pipeline).__name__ if pipeline else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                    f.write(log_entry)
-                                                    f.flush()
-                                            except: pass
-                                            # #endregion
                                             
                                             logger.info("Modell erfolgreich mit low_cpu_mem_usage geladen")
                                         except (TypeError, ValueError, RuntimeError) as e2:
                                             # Strategie 3: Ohne low_cpu_mem_usage
                                             logger.warning(f"low_cpu_mem_usage nicht unterstützt ({e2}), versuche ohne diese Option")
                                             
-                                            # #region agent log - Direkt vor from_pretrained (ohne low_cpu_mem_usage)
-                                            try:
-                                                import json
-                                                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                                with open(log_path, 'a', encoding='utf-8') as f:
-                                                    log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"DIREKT VOR from_pretrained - ohne low_cpu_mem_usage","data":{"model_path":model_path},"sessionId":"debug-session","runId":"run1","hypothesisId":"G"}) + '\n'
-                                                    f.write(log_entry)
-                                                    f.flush()
-                                            except: pass
-                                            # #endregion
-                                            
                                             pipeline = DiffusionPipeline.from_pretrained(
                                                 model_path,
-                                                torch_dtype=torch.bfloat16,
+                                                dtype=torch.float16,
                                                 **load_kwargs
                                             )
                                             logger.info("Modell erfolgreich ohne low_cpu_mem_usage geladen")
                                     
-                                    # #region agent log - Nach from_pretrained
-                                    try:
-                                        import json
-                                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                        with open(log_path, 'a', encoding='utf-8') as f:
-                                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"NACH from_pretrained - Pipeline geladen","data":{"pipeline_type":type(pipeline).__name__ if pipeline else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,F"}) + '\n'
-                                            f.write(log_entry)
-                                            f.flush()
-                                    except: pass
-                                    # #endregion
-                                    
                                     result_queue.put(pipeline)
-                                    
-                                    # #region agent log - Success
-                                    try:
-                                        import json
-                                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                        with open(log_path, 'a', encoding='utf-8') as f:
-                                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"Pipeline erfolgreich geladen","data":{"pipeline_type":type(pipeline).__name__ if pipeline else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                            f.write(log_entry)
-                                            f.flush()
-                                    except: pass
-                                    # #endregion
                                     
                                 except Exception as e:
                                     error_queue.put(e)
-                                    # #region agent log - Error
-                                    try:
-                                        import json, traceback
-                                        log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                        with open(log_path, 'a', encoding='utf-8') as f:
-                                            log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_worker","message":"Load Worker Exception","data":{"error":str(e),"error_type":type(e).__name__,"traceback":traceback.format_exc()},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                            f.write(log_entry)
-                                            f.flush()
-                                    except: pass
-                                    # #endregion
                                 finally:
                                     # Stelle ursprüngliche Umgebungsvariablen wieder her
                                     if original_xformers is not None:
@@ -718,18 +448,7 @@ class ImageManager:
                         load_thread = threading.Thread(target=_load_worker, daemon=True, name="flux_loader")
                         load_thread.start()
                         
-                        # #region agent log - Thread Started
-                        try:
-                            import json
-                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                            with open(log_path, 'a', encoding='utf-8') as f:
-                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_pipeline_with_timeout","message":"Load Thread gestartet, warte auf Ergebnis","data":{"timeout_seconds":timeout_seconds,"thread_id":load_thread.ident},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                f.write(log_entry)
-                                f.flush()
-                        except: pass
-                        # #endregion
-                        
-                        # Warte auf Ergebnis mit Timeout und periodischen Checks
+                        ## Warte auf Ergebnis mit Timeout und periodischen Checks
                         start_wait = time.time()
                         check_interval = 5.0  # Prüfe alle 5 Sekunden
                         last_check = start_wait
@@ -743,26 +462,7 @@ class ImageManager:
                             
                             # Prüfe auf Timeout
                             if elapsed >= timeout_seconds:
-                                # #region agent log - Timeout
-                                try:
-                                    import json
-                                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                    mem_data = {}
-                                    if psutil:
-                                        try:
-                                            process = psutil.Process()
-                                            mem_info = process.memory_info()
-                                            mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                                        except: pass
-                                    gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                                    mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                                    with open(log_path, 'a', encoding='utf-8') as f:
-                                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_pipeline_with_timeout","message":"TIMEOUT: Load Thread hängt noch","data":{"timeout_seconds":timeout_seconds,"thread_alive":load_thread.is_alive(),"elapsed":elapsed,"thread_id":load_thread.ident,"result_queue_empty":result_queue.empty(),"error_queue_empty":error_queue.empty(),**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                        f.write(log_entry)
-                                        f.flush()
-                                except: pass
-                                # #endregion
-                                # Prüfe ob vielleicht doch ein Ergebnis da ist (Race Condition)
+                                ## Prüfe ob vielleicht doch ein Ergebnis da ist (Race Condition)
                                 if not result_queue.empty():
                                     logger.info("Ergebnis nach Timeout gefunden - Thread war langsamer als erwartet")
                                     return result_queue.get()
@@ -775,27 +475,7 @@ class ImageManager:
                             # Periodische Heartbeat-Logs
                             if time.time() - last_check >= check_interval:
                                 last_check = time.time()
-                                # #region agent log - Heartbeat
-                                try:
-                                    import json
-                                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                                    mem_data = {}
-                                    if psutil:
-                                        try:
-                                            process = psutil.Process()
-                                            mem_info = process.memory_info()
-                                            mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                                        except: pass
-                                    gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                                    mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                                    with open(log_path, 'a', encoding='utf-8') as f:
-                                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:_load_pipeline_with_timeout","message":"HEARTBEAT: Warte noch auf Load Thread","data":{"elapsed_seconds":elapsed,"thread_alive":load_thread.is_alive(),"thread_id":load_thread.ident,**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                        f.write(log_entry)
-                                        f.flush()
-                                except: pass
-                                # #endregion
-                            
-                            # Kurz warten bevor nächster Check
+                                ## Kurz warten bevor nächster Check
                             time.sleep(0.5)
                         
                         # Thread ist beendet, prüfe auf Ergebnis
@@ -824,99 +504,16 @@ class ImageManager:
                             # Flux-Modelle können sehr groß sein und brauchen länger zum Laden
                             self.pipeline = _load_pipeline_with_timeout(model_path, load_kwargs, timeout_seconds=600)
                         
-                        # #region agent log - Nach erfolgreichem Aufruf
-                        try:
-                            import json
-                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                            elapsed = time.time() - from_pretrained_start_time
-                            with open(log_path, 'a', encoding='utf-8') as f:
-                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:535","message":"from_pretrained erfolgreich abgeschlossen","data":{"model_path":model_path,"thread_id":threading.current_thread().ident,"elapsed_seconds":elapsed,"pipeline_type":type(self.pipeline).__name__ if self.pipeline else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,D,F"}) + '\n'
-                                f.write(log_entry)
-                                f.flush()
-                        except: pass
-                        # #endregion
                     except TimeoutError as timeout_error:
-                        # #region agent log - Timeout Error
-                        try:
-                            import json
-                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                            elapsed = time.time() - from_pretrained_start_time
-                            mem_data = {}
-                            if psutil:
-                                try:
-                                    process = psutil.Process()
-                                    mem_info = process.memory_info()
-                                    mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                                except: pass
-                            gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                            mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                            with open(log_path, 'a', encoding='utf-8') as f:
-                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:545","message":"TIMEOUT beim Modell-Laden","data":{"error":str(timeout_error),"elapsed_seconds":elapsed,**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n'
-                                f.write(log_entry)
-                                f.flush()
-                        except: pass
-                        # #endregion
                         logger.error(f"TIMEOUT: {timeout_error}")
                         raise
                     except Exception as from_pretrained_error:
-                        # #region agent log
-                        try:
-                            import json, traceback
-                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                            elapsed = time.time() - from_pretrained_start_time
-                            mem_data = {}
-                            if psutil:
-                                try:
-                                    process = psutil.Process()
-                                    mem_info = process.memory_info()
-                                    mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                                except: pass
-                            gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                            mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                            with open(log_path, 'a', encoding='utf-8') as f:
-                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:565","message":"from_pretrained Exception","data":{"error":str(from_pretrained_error),"error_type":type(from_pretrained_error).__name__,"elapsed_seconds":elapsed,"traceback":traceback.format_exc(),**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,D,F"}) + '\n'
-                                f.write(log_entry)
-                                f.flush()
-                        except: pass
-                        # #endregion
                         raise
                     except BaseException as from_pretrained_crash:
                         # Fange auch SystemExit, KeyboardInterrupt etc.
-                        # #region agent log
-                        try:
-                            import json, traceback
-                            log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                            elapsed = time.time() - from_pretrained_start_time
-                            with open(log_path, 'a', encoding='utf-8') as f:
-                                log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:580","message":"from_pretrained BaseException (möglicher Crash)","data":{"error":str(from_pretrained_crash),"error_type":type(from_pretrained_crash).__name__,"elapsed_seconds":elapsed,"traceback":traceback.format_exc()},"sessionId":"debug-session","runId":"run1","hypothesisId":"C,D,F"}) + '\n'
-                                f.write(log_entry)
-                                f.flush()
-                        except: pass
-                        # #endregion
                         raise
                 
-                # #region agent log
-                try:
-                    import json, time
-                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                    mem_data = {}
-                    if psutil:
-                        try:
-                            process = psutil.Process()
-                            mem_info = process.memory_info()
-                            mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                            mem_data["cpu_mem_vms_gb"] = mem_info.vms/1024**3
-                        except: pass
-                    gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                    gpu_mem_reserved = torch.cuda.memory_reserved(0) / 1024**3 if torch.cuda.is_available() else 0
-                    mem_data.update({"gpu_mem_alloc_gb":gpu_mem_alloc,"gpu_mem_reserved_gb":gpu_mem_reserved})
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:323","message":"from_pretrained erfolgreich - Memory Check","data":{"pipeline_type":type(self.pipeline).__name__ if self.pipeline else None,"thread_id":threading.current_thread().ident,**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-                
-                # Pipeline erfolgreich geladen - setze current_model_id jetzt (vor GPU-Transfer)
+                ## Pipeline erfolgreich geladen - setze current_model_id jetzt (vor GPU-Transfer)
                 # So können wir auch bei GPU-Fehlern erkennen, dass Pipeline geladen wurde
                 self.current_model_id = model_id
                 logger.info(f"Pipeline erfolgreich geladen, Modell-ID gesetzt: {model_id}")
@@ -931,25 +528,7 @@ class ImageManager:
                 }
                 logger.info(f"Pipeline-Status nach from_pretrained: {pipeline_info}")
             except Exception as e1:
-                # #region agent log
-                try:
-                    import json, time, traceback
-                    log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                    mem_data = {}
-                    if psutil:
-                        try:
-                            process = psutil.Process()
-                            mem_info = process.memory_info()
-                            mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                        except: pass
-                    gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                    mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                    with open(log_path, 'a', encoding='utf-8') as f:
-                        log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:344","message":"Erster Ladeversuch fehlgeschlagen","data":{"error":str(e1),"error_type":type(e1).__name__,"model_id":model_id,"model_path":model_path,"thread_id":threading.current_thread().ident,"traceback":traceback.format_exc(),**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"A,C,D"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-                logger.warning(f"Erster Ladeversuch fehlgeschlagen: {e1}, versuche mit local_files_only=True...")
+                #logger.warning(f"Erster Ladeversuch fehlgeschlagen: {e1}, versuche mit local_files_only=True...")
                 try:
                     # Fallback: Nur lokale Dateien
                     self.pipeline = DiffusionPipeline.from_pretrained(
@@ -958,17 +537,7 @@ class ImageManager:
                         local_files_only=True
                     )
                 except Exception as e2:
-                    # #region agent log
-                    try:
-                        import importlib.util
-                        has_sentencepiece = importlib.util.find_spec('sentencepiece') is not None
-                        with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                            import json
-                            log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:185","message":"Zweiter Ladeversuch fehlgeschlagen","data":{"error":str(e2),"model_id":model_id,"model_path":model_path,"has_sentencepiece":has_sentencepiece,"error_type":type(e2).__name__},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n'
-                            f.write(log_entry)
-                    except: pass
-                    # #endregion
-                    logger.error(f"Fehler beim Laden der Pipeline: {e2}")
+                    #logger.error(f"Fehler beim Laden der Pipeline: {e2}")
                     raise
                 
             # Auf GPU verschieben wenn verfügbar
@@ -1104,25 +673,7 @@ class ImageManager:
             return True
             
         except Exception as e:
-            # #region agent log
-            try:
-                import json, time, traceback
-                log_path = r'g:\04-CODING\Local Ai\.cursor\debug.log'
-                mem_data = {}
-                if psutil:
-                    try:
-                        process = psutil.Process()
-                        mem_info = process.memory_info()
-                        mem_data["cpu_mem_rss_gb"] = mem_info.rss/1024**3
-                    except: pass
-                gpu_mem_alloc = torch.cuda.memory_allocated(0) / 1024**3 if torch.cuda.is_available() else 0
-                mem_data["gpu_mem_alloc_gb"] = gpu_mem_alloc
-                with open(log_path, 'a', encoding='utf-8') as f:
-                    log_entry = json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"image_manager.py:470","message":"load_model Exception (außerhalb try)","data":{"error":str(e),"error_type":type(e).__name__,"model_id":model_id,"thread_id":threading.current_thread().ident,"traceback":traceback.format_exc(),**mem_data},"sessionId":"debug-session","runId":"run1","hypothesisId":"A,C,D"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            logger.error(f"Fehler beim Laden des Bildgenerierungsmodells: {e}")
+            #logger.error(f"Fehler beim Laden des Bildgenerierungsmodells: {e}")
             self.pipeline = None
             return False
         finally:
@@ -1203,18 +754,30 @@ class ImageManager:
         if not torch.cuda.is_available():
             return 0.0
         
-        # Basis-Speicher für geladenes Modell (ca. 30GB für Flux)
-        base_model_memory = 30.0
+        # Basis-Speicher für geladenes Modell (dynamisch je nach Modell)
+        # SDXL: ~7GB, FLUX: ~30GB, SD1.5: ~4GB
+        if self.current_model_id:
+            model_id_lower = self.current_model_id.lower()
+            if 'sdxl' in model_id_lower:
+                base_model_memory = 7.0  # SDXL Base
+            elif 'flux' in model_id_lower:
+                base_model_memory = 30.0  # FLUX
+            elif 'sd3' in model_id_lower:
+                base_model_memory = 10.0  # SD3
+            else:
+                base_model_memory = 5.0  # SD1.5 und andere
+        else:
+            base_model_memory = 7.0  # Default für SDXL
         
         # Zusätzlicher Speicher für Bildgenerierung
-        # Formel: width * height * multiplier * num_steps
-        # Multiplier basierend auf Erfahrungswerten
+        # Realistischere Formel: ~0.5-1GB für 1024x1024
         pixel_count = width * height
-        multiplier = 0.00001  # GB pro Pixel pro Schritt (konservativ)
-        generation_memory = pixel_count * multiplier * num_inference_steps
+        megapixels = pixel_count / (1024 * 1024)
+        # ~1GB pro Megapixel bei 20 Steps
+        generation_memory = megapixels * 0.05 * num_inference_steps / 20.0
         
-        # Sicherheitspuffer: 10%
-        total_memory = (base_model_memory + generation_memory) * 1.1
+        # Sicherheitspuffer: 20%
+        total_memory = (base_model_memory + generation_memory) * 1.2
         
         return total_memory
     
@@ -1354,16 +917,7 @@ class ImageManager:
         try:
             logger.info(f"Generiere Bild mit Prompt: {prompt[:50]}... (Größe: {width}x{height})")
             
-            # #region agent log
-            try:
-                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    import json
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:307","message":"generate_image aufgerufen","data":{"prompt_length":len(prompt),"pipeline_loaded":self.pipeline is not None,"current_model":self.current_model_id,"width":width,"height":height,"aspect_ratio":aspect_ratio,"use_cpu_offload":use_cpu_offload,"auto_resized":(width,height)!=(original_width,original_height)},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            
-            # Generiere Bild mit Retry-Logik bei OOM
+            ## Generiere Bild mit Retry-Logik bei OOM
             max_oom_retries = 2
             oom_retry_count = 0
             
@@ -1386,16 +940,7 @@ class ImageManager:
                         if negative_prompt:
                             pipeline_kwargs["negative_prompt"] = negative_prompt
                         
-                        # #region agent log
-                        try:
-                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                                import json
-                                log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:328","message":"Rufe Pipeline auf","data":{"pipeline_type":self.pipeline.__class__.__name__,"kwargs_keys":list(pipeline_kwargs.keys())},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n'
-                                f.write(log_entry)
-                        except: pass
-                        # #endregion
-                        
-                        result = self.pipeline(**pipeline_kwargs)
+                        #result = self.pipeline(**pipeline_kwargs)
                     break  # Erfolgreich - verlasse Retry-Schleife
                         
                 except torch.cuda.OutOfMemoryError as oom_error:
@@ -1425,25 +970,7 @@ class ImageManager:
                         except Exception as e:
                             logger.warning(f"Konnte CPU-Offload nicht aktivieren: {e}")
                 
-                # #region agent log
-                try:
-                    with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                        import json
-                        log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:336","message":"Pipeline aufruf abgeschlossen","data":{"result_type":type(result).__name__,"is_dict":isinstance(result,dict),"is_list":isinstance(result,(list,tuple))},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n'
-                        f.write(log_entry)
-                except: pass
-                # #endregion
-            
-            # Extrahiere Bild (kann variieren je nach Pipeline)
-            # #region agent log
-            try:
-                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    import json
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:330","message":"Extrahiere Bild aus Result","data":{"result_type":type(result).__name__,"is_dict":isinstance(result,dict),"is_list":isinstance(result,(list,tuple)),"dict_keys":list(result.keys()) if isinstance(result,dict) else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            
+                ## Extrahiere Bild (kann variieren je nach Pipeline)
             if isinstance(result, dict):
                 # Flux gibt normalerweise {"images": [PIL.Image]} zurück
                 images = result.get("images", [])
@@ -1462,16 +989,7 @@ class ImageManager:
                 # Direktes PIL Image
                 image = result
             
-            # #region agent log
-            try:
-                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    import json
-                    log_entry = json.dumps({"id":f"log_{int(__import__('time').time()*1000)}","timestamp":int(__import__('time').time()*1000),"location":"image_manager.py:350","message":"Bild extrahiert","data":{"image_is_none":image is None,"image_type":type(image).__name__ if image else None},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n'
-                    f.write(log_entry)
-            except: pass
-            # #endregion
-            
-            if image is None:
+            #if image is None:
                 logger.error("Kein Bild von Pipeline erhalten")
                 return None
             

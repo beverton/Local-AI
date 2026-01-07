@@ -384,10 +384,62 @@ body {
     color: white;
 }
 
+/* Klickbare Links in Nachrichten */
+.message-link {
+    color: #5baaff;
+    text-decoration: underline;
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.message-link:hover {
+    color: #7bc0ff;
+    text-decoration: underline;
+}
+
+.message.user .message-link {
+    color: #ffffff;
+    text-decoration: underline;
+    font-weight: 500;
+}
+
+.message.user .message-link:hover {
+    color: #f0f0f0;
+}
+
 .message-timestamp {
     font-size: 11px;
     color: var(--text-secondary);
     margin-top: 5px;
+}
+
+/* Generierte Bilder im Chat */
+.generated-image {
+    max-width: 100%;
+    width: auto;
+    height: auto;
+    border-radius: 8px;
+    margin: 10px 0;
+    display: block;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.generated-image:hover {
+    transform: scale(1.02);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.image-prompt {
+    font-style: italic;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent);
+    font-size: 0.9em;
 }
 
 /* Fortschrittsanzeige für Streaming */
@@ -1065,4 +1117,111 @@ body {
     background: var(--border);
 }
 
+/* Image Lightbox */
+.image-lightbox {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.2s ease;
+}
 
+.lightbox-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.9);
+    backdrop-filter: blur(4px);
+}
+
+.lightbox-content {
+    position: relative;
+    z-index: 10001;
+    max-width: 90vw;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.lightbox-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+.lightbox-prompt {
+    flex: 1;
+    font-size: 14px;
+    color: var(--text-primary);
+    font-style: italic;
+}
+
+.lightbox-close {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.lightbox-close:hover {
+    background: var(--accent);
+    color: white;
+    transform: rotate(90deg);
+}
+
+.lightbox-image {
+    max-width: 90vw;
+    max-height: calc(90vh - 120px);
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+.lightbox-actions {
+    display: flex;
+    gap: 10px;
+    padding: 15px 20px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    justify-content: center;
+}
+
+.btn-download {
+    padding: 10px 20px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.btn-download:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}

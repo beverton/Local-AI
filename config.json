@@ -6,6 +6,12 @@
       "type": "qwen2",
       "description": "Coding-spezialisiertes Modell"
     },
+    "qwen-2.5-7b-instruct": {
+      "name": "Qwen 2.5 7B Instruct",
+      "path": "G:\\KI Modelle\\coding\\qwen-2.5-7b-instruct",
+      "type": "qwen2",
+      "description": "⭐ EMPFOHLEN: Bestes Tool-Use & Web-Search - optimiert für präzise Antworten"
+    },
     "phi-3-mini-4k": {
       "name": "Phi-3 Mini 4K Instruct",
       "path": "G:\\KI Modelle\\science\\phi-3-mini-4k-instruct\\snapshots\\0a67737cc96d2554230f90338b163bc6380a2a85",
@@ -18,11 +24,11 @@
       "type": "mistral",
       "description": "Chat-optimiertes Modell mit CUDA-Unterstützung"
     },
-    "flux-1-schnell": {
-      "name": "Flux 1 Schnell",
-      "path": "G:\\KI Modelle\\image\\flux-1-schnell",
+    "sdxl-base-1.0": {
+      "name": "Stable Diffusion XL Base 1.0",
+      "path": "G:\\KI Modelle\\image\\sdxl-base-1.0",
       "type": "image",
-      "description": "Bildgenerierung mit Flux 1 Schnell"
+      "description": "⭐ STANDARD: Bildgenerierung - schnell, stabil, 7GB VRAM, kommerziell nutzbar"
     },
     "whisper-large-v3": {
       "name": "Whisper Large V3",
@@ -31,7 +37,7 @@
       "description": "Spracherkennung mit Whisper Large V3"
     }
   },
-  "default_model": "qwen-2.5-3b",
+  "default_model": "qwen-2.5-7b-instruct",
   "server": {
     "host": "127.0.0.1",
     "port": 8000
@@ -47,7 +53,16 @@
     "client_cleanup_interval": 300
   },
   "temp_directory": "G:\\KI Modelle\\KI-Temp",
+  "output_paths": {
+    "base_directory": "G:\\KI Modelle\\Outputs",
+    "images": "generated_images",
+    "conversations": "conversations",
+    "audio": "audio",
+    "use_date_folders": true,
+    "filename_format": "{date}_{title}"
+  },
   "image_generation": {
+    "default_model": "sdxl-base-1.0",
     "resolution_presets": {
       "s": 512,
       "m": 720,
@@ -55,5 +70,3 @@
     }
   }
 }
-
-

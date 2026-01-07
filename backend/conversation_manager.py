@@ -162,13 +162,11 @@ class ConversationManager:
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                logger.info(f"Conversation gelöscht: {conversation_id}")
                 return True
             except Exception as e:
-                logger.error(f"Fehler beim Löschen der Conversation: {e}")
                 return False
         
-        return False
+        #return False
     
     def get_conversation_history(self, conversation_id: str) -> List[Dict[str, str]]:
         """

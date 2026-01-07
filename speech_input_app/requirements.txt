@@ -25,3 +25,4 @@ pyautogui>=0.9.54
 pyinstaller>=5.0.0
 
 
+

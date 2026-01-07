@@ -1,0 +1,21 @@
+{
+  "id": "f6abd445-eb34-486d-bd5a-fa705fea5b87",
+  "title": "Wer ist aktuell Bundeskanzler von Deutschland?",
+  "created_at": "2026-01-07T21:31:41.270502",
+  "updated_at": "2026-01-07T21:31:41.826531",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Wer ist aktuell Bundeskanzler von Deutschland?",
+      "timestamp": "2026-01-07T21:31:41.291545"
+    },
+    {
+      "role": "assistant",
+      "content": "Fehler: Runtime-Fehler: Kein Modell geladen!",
+      "timestamp": "2026-01-07T21:31:41.826527"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

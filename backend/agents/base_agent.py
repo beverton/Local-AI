@@ -30,6 +30,7 @@ class BaseAgent(ABC):
         self.model_manager = None  # Wird später gesetzt
         self.agent_manager = None  # Wird später gesetzt
         self.image_manager = None  # Wird später gesetzt
+        self.model_service_client = None  # Wird später gesetzt (für Model Service)
     
     def set_model_manager(self, model_manager):
         """Setzt den ModelManager"""
@@ -42,6 +43,10 @@ class BaseAgent(ABC):
     def set_image_manager(self, image_manager):
         """Setzt den ImageManager"""
         self.image_manager = image_manager
+    
+    def set_model_service_client(self, model_service_client):
+        """Setzt den Model Service Client"""
+        self.model_service_client = model_service_client
     
     def process_message(self, message: str, from_agent_id: Optional[str] = None) -> str:
         """
