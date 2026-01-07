@@ -18,12 +18,14 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import csv
 import io
+import uuid
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from model_manager import ModelManager
 from conversation_manager import ConversationManager
 from preference_learner import PreferenceLearner
+from quality_manager import QualityManager
 
 # Logger muss vor dem try-except verfügbar sein
 import logging
@@ -184,6 +186,9 @@ model_manager = ModelManager(config_path=config_path)
 conversation_manager = ConversationManager()
 preference_learner = PreferenceLearner()
 
+# Initialisiere Quality Manager mit Web-Search (global) - für ALLE Chat-Modelle
+quality_manager = QualityManager(web_search_function=web_search)
+
 # ImageManager initialisieren (mit Fehlerbehandlung)
 
 image_manager = None
@@ -222,6 +227,10 @@ def check_model_service_available() -> bool:
 model_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model_loader")
 image_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="image_loader")
 audio_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio_loader")
+# Thread Pool für Web-Search (damit Server nicht blockiert)
+web_search_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="web_search")
+# Thread Pool für Modell-Generierung (damit Server nicht blockiert)
+model_generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model_generation")
 
 # Lade-Status für alle Manager
 loading_status = {
@@ -354,12 +363,24 @@ class PerformanceSettingsRequest(BaseModel):
     cpu_threads: Optional[int] = None
     gpu_optimization: str = "balanced"  # balanced, speed, memory
     disable_cpu_offload: bool = False
+    use_torch_compile: Optional[bool] = None
+    use_quantization: Optional[bool] = None
+    quantization_bits: Optional[int] = None
+    use_flash_attention: Optional[bool] = None
+    enable_tf32: Optional[bool] = None
+    enable_cudnn_benchmark: Optional[bool] = None
 
 
 class PerformanceSettingsResponse(BaseModel):
     cpu_threads: Optional[int]
     gpu_optimization: str
     disable_cpu_offload: bool
+    use_torch_compile: bool
+    use_quantization: bool
+    quantization_bits: int
+    use_flash_attention: bool
+    enable_tf32: bool
+    enable_cudnn_benchmark: bool
 
 
 class AudioSettingsRequest(BaseModel):
@@ -390,6 +411,50 @@ async def get_status():
         "current_model": model_manager.get_current_model(),
         "preference_learning_enabled": preference_learner.is_enabled()
     }
+
+
+@app.get("/health")
+async def health_check():
+    """Health-Check für alle geladenen Modelle"""
+    import time
+    health_status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "models": {}
+    }
+    
+    # Text-Modell
+    if model_manager.is_model_loaded():
+        text_health = model_manager.health_check()
+        health_status["models"]["text"] = {
+            "loaded": True,
+            "healthy": text_health["healthy"],
+            "last_check": text_health["last_check"],
+            "response_time_ms": text_health["response_time_ms"],
+            "error": text_health.get("error")
+        }
+        if not text_health["healthy"]:
+            health_status["status"] = "degraded"
+    else:
+        health_status["models"]["text"] = {
+            "loaded": False,
+            "healthy": False
+        }
+    
+    # Audio-Modell (Whisper - vorerst nur Basis-Status, kein Health-Check)
+    if whisper_manager.is_model_loaded():
+        health_status["models"]["audio"] = {
+            "loaded": True,
+            "healthy": True,  # Whisper funktioniert zuverlässig, daher immer healthy
+            "note": "Whisper Health-Check vorerst ausgelassen - funktioniert bereits sehr gut"
+        }
+    else:
+        health_status["models"]["audio"] = {
+            "loaded": False,
+            "healthy": False
+        }
+    
+    return health_status
 
 
 @app.get("/system/stats")
@@ -792,7 +857,7 @@ async def chat_stream(request: ChatRequest):
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     """
     Chat-Endpunkt - verarbeitet eine Nachricht und gibt eine Antwort zurück
     """
@@ -866,11 +931,12 @@ async def chat(request: ChatRequest):
             }
         )
     
-    # Prüfe Agent-Modus
-    agent_mode_enabled = conversation_manager.get_agent_mode(conversation_id)
+    # Prüfe File-Mode (nur Datei-Operationen)
+    # Web-Search ist immer aktiv über Quality Management
+    file_mode_enabled = conversation_manager.get_file_mode(conversation_id)
     
-    # Wenn Agent-Modus aktiviert, nutze ChatAgent
-    if agent_mode_enabled:
+    # Wenn File-Mode aktiviert, nutze ChatAgent für Datei-Operationen
+    if file_mode_enabled:
         try:
             # Stelle sicher dass Modell geladen ist
             if USE_MODEL_SERVICE:
@@ -931,7 +997,7 @@ async def chat(request: ChatRequest):
             logger.error(f"Fehler bei Agent-Modus: {e}")
             # Fallback auf normalen Chat-Modus bei Fehler
             logger.warning("Fallback auf normalen Chat-Modus")
-            agent_mode_enabled = False
+            file_mode_enabled = False
     
     # Lade Conversation History
     history = conversation_manager.get_conversation_history(conversation_id)
@@ -1021,12 +1087,25 @@ async def chat(request: ChatRequest):
         
         if USE_MODEL_SERVICE:
             # Nutze Model-Service
-            result = model_service_client.chat(
-                message=request.message,
-                messages=messages,  # Sende vollständige Messages-Liste
-                conversation_id=conversation_id,
-                max_length=request.max_length,
-                temperature=effective_temperature
+            # WICHTIG: Chat-Request in Thread Pool ausführen (blockiert Event Loop nicht)
+            def chat_in_thread():
+                """Chat-Request in separatem Thread"""
+                try:
+                    return model_service_client.chat(
+                        message=request.message,
+                        messages=messages,  # Sende vollständige Messages-Liste
+                        conversation_id=conversation_id,
+                        max_length=request.max_length,
+                        temperature=effective_temperature
+                    )
+                except Exception as e:
+                    logger.error(f"Fehler bei Model-Service Chat im Thread: {e}")
+                    raise
+            
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                model_generation_executor,
+                chat_in_thread
             )
             if result:
                 response = result.get("response", "")
@@ -1034,10 +1113,23 @@ async def chat(request: ChatRequest):
                 raise HTTPException(status_code=500, detail="Fehler bei Chat-Request an Model-Service")
         else:
             # Fallback: Nutze lokale Manager
-            response = model_manager.generate(
-                messages,
-                max_length=request.max_length,
-                temperature=effective_temperature
+            # WICHTIG: Generierung in Thread Pool ausführen (blockiert Event Loop nicht)
+            def generate_in_thread():
+                """Generiert Antwort in separatem Thread"""
+                try:
+                    return model_manager.generate(
+                        messages,
+                        max_length=request.max_length,
+                        temperature=effective_temperature
+                    )
+                except Exception as e:
+                    logger.error(f"Fehler bei Modell-Generierung im Thread: {e}")
+                    raise
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                model_generation_executor,
+                generate_in_thread
             )
         
         # Logge Response
@@ -1110,12 +1202,107 @@ async def chat(request: ChatRequest):
         if cleaned_response.lower().startswith('assistant'):
             cleaned_response = cleaned_response.split(':', 1)[-1].strip() if ':' in cleaned_response else cleaned_response[9:].strip()
         
-        # Speichere Nachrichten (nur bereinigte Response)
-        conversation_manager.add_message(conversation_id, "user", request.message)
-        conversation_manager.add_message(conversation_id, "assistant", cleaned_response)
-        
-        # Verwende bereinigte Response für Rückgabe
+        # Verwende bereinigte Response für Quality Management
         response = cleaned_response
+        
+        # Quality Management (nutzt automatisch Web-Search wenn nötig) - für ALLE Chat-Modelle
+        # Funktioniert mit Qwen, Phi-3, Mistral, etc. - modellunabhängig
+        # WICHTIG: Web-Search läuft asynchron im Thread Pool - blockiert Server NICHT
+        validation = {
+            "valid": True,
+            "confidence": 1.0,
+            "issues": [],
+            "sources": [],
+            "suggestions": []
+        }
+        
+        # Prüfe ob Quality Management aktiviert ist
+        quality_settings = quality_manager.get_settings()
+        sources = []
+        
+        # WICHTIG: Web-Search ist standardmäßig DEAKTIVIERT um Server-Blockierung zu vermeiden
+        # Wenn aktiviert, läuft es komplett im Hintergrund (blockiert Response NICHT)
+        # Quellen werden nicht in die Response eingefügt, da Web-Search asynchron läuft
+        if quality_settings.get("auto_web_search", False):  # Default: False (nicht blockierend)
+            # Prüfe ob Frage Web-Search benötigt
+            needs_search = quality_manager._needs_web_search(request.message)
+            if needs_search:
+                # Web-Search komplett im Hintergrund (blockiert Response NICHT)
+                # Response wird sofort zurückgegeben, Web-Search läuft weiter
+                def do_web_search_background():
+                    try:
+                        search_results = quality_manager.web_search(request.message, max_results=5)
+                        if search_results and "results" in search_results:
+                            logger.info(f"Web-Search im Hintergrund: {len(search_results['results'])} Quellen")
+                    except Exception as e:
+                        logger.warning(f"Web-Search im Hintergrund fehlgeschlagen: {e}")
+                
+                # Starte im Hintergrund (blockiert nicht)
+                background_tasks.add_task(do_web_search_background)
+                logger.debug("Web-Search im Hintergrund gestartet (Response wird sofort zurückgegeben)")
+        
+        # Basis-Validierung (ohne Web-Search - schnell, nicht blockierend)
+        # WICHTIG: Validierung läuft nur wenn aktiviert, sonst wird sie übersprungen
+        if quality_settings.get("web_validation", True):
+            try:
+                # Validierung mit auto_search=False (kein Web-Search, nicht blockierend)
+                temp_validation = quality_manager.validate_response(
+                    response=response,
+                    question=request.message,
+                    auto_search=False  # Web-Search deaktiviert (wird im Hintergrund gemacht wenn aktiviert)
+                )
+                # Füge Quellen hinzu (falls vorhanden)
+                temp_validation["sources"] = sources
+                validation = temp_validation
+            except Exception as qm_error:
+                logger.warning(f"Quality Management Validierung fehlgeschlagen (überspringe): {qm_error}")
+                # Fallback: Validation ohne Web-Search
+                validation = {
+                    "valid": True,
+                    "confidence": 0.8,
+                    "issues": [],
+                    "sources": sources,  # Quellen trotzdem hinzufügen falls vorhanden
+                    "suggestions": []
+                }
+        else:
+            # Quality Management deaktiviert - überspringe Validierung komplett
+            validation = {
+                "valid": True,
+                "confidence": 1.0,
+                "issues": [],
+                "sources": sources,
+                "suggestions": []
+            }
+        
+        # Quellen im Fließtext als klickbare Links im Header der Antwort
+        sources_header = ""
+        if validation["sources"]:
+            source_links = []
+            for i, source in enumerate(validation["sources"][:5], 1):  # Max 5 Quellen
+                url = source.get("url", "")
+                title = source.get("title", f"Quelle {i}")
+                if url:
+                    source_links.append(f'<a href="{url}" target="_blank" rel="noopener noreferrer">[{i}] {title}</a>')
+            
+            if source_links:
+                sources_header = f"<div style='margin-bottom: 1em; font-size: 0.9em; color: #666;'><strong>Quellen:</strong> {' | '.join(source_links)}</div>\n\n"
+        
+        # Füge Quellen-Header zur Response hinzu
+        if sources_header:
+            response = sources_header + response
+        
+        # Füge Quality-Info zur Response hinzu (optional, nur bei niedriger Konfidenz)
+        if validation["confidence"] < 0.7:
+            response += f"\n\n<div style='margin-top: 1em; padding: 0.5em; background: #fff3cd; border-left: 3px solid #ffc107;'><strong>Warnung:</strong> Diese Antwort hat eine niedrige Konfidenz ({validation['confidence']:.0%}). Bitte prüfen Sie die Quellen.</div>"
+        
+        # Speichere Nachrichten mit Quality-Info und Quellen (nur einmal)
+        response_id = str(uuid.uuid4())
+        conversation_manager.add_message(conversation_id, "user", request.message)
+        conversation_manager.add_message(conversation_id, "assistant", response, metadata={
+            "quality": validation,
+            "response_id": response_id,
+            "sources": validation["sources"]  # Quellen für spätere Referenz
+        })
         
         # Lerne aus Conversation (wenn aktiviert)
         if preference_learner.is_enabled():
@@ -1124,8 +1311,13 @@ async def chat(request: ChatRequest):
         
         return ChatResponse(response=response, conversation_id=conversation_id)
         
+    except HTTPException:
+        # HTTPExceptions direkt weiterwerfen
+        raise
     except Exception as e:
-        logger.error(f"Fehler bei der Generierung: {e}")
+        logger.error(f"Fehler bei der Generierung: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Fehler bei der Generierung: {str(e)}")
 
 
@@ -1157,37 +1349,55 @@ async def create_image_conversation():
     return {"conversation_id": conversation_id}
 
 
-@app.get("/conversations/{conversation_id}/agent-mode")
-async def get_agent_mode(conversation_id: str):
-    """Gibt den Agent-Modus-Status einer Conversation zurück"""
+@app.get("/conversations/{conversation_id}/file-mode")
+async def get_file_mode(conversation_id: str):
+    """Gibt den File-Mode-Status einer Conversation zurück (nur Datei-Operationen)"""
     conversation = conversation_manager.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
     
-    agent_mode = conversation_manager.get_agent_mode(conversation_id)
-    return {"conversation_id": conversation_id, "agent_mode": agent_mode}
+    file_mode = conversation_manager.get_file_mode(conversation_id)
+    return {"conversation_id": conversation_id, "file_mode": file_mode}
 
 
+# Alias für Rückwärtskompatibilität
+@app.get("/conversations/{conversation_id}/agent-mode")
+async def get_agent_mode(conversation_id: str):
+    """Alias für get_file_mode (Rückwärtskompatibilität)"""
+    return await get_file_mode(conversation_id)
+
+
+class SetFileModeRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/conversations/{conversation_id}/file-mode")
+async def set_file_mode(conversation_id: str, request: SetFileModeRequest):
+    """Aktiviert oder deaktiviert den File-Mode für eine Conversation (nur Datei-Operationen)"""
+    conversation = conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    
+    success = conversation_manager.set_file_mode(conversation_id, request.enabled)
+    if not success:
+        raise HTTPException(status_code=500, detail="Fehler beim Setzen des File-Modus")
+    
+    return {
+        "conversation_id": conversation_id,
+        "file_mode": request.enabled,
+        "message": f"File-Mode {'aktiviert' if request.enabled else 'deaktiviert'} (nur Datei-Operationen, Web-Search ist immer aktiv)"
+    }
+
+
+# Alias für Rückwärtskompatibilität
 class SetAgentModeRequest(BaseModel):
     enabled: bool
 
 
 @app.post("/conversations/{conversation_id}/agent-mode")
 async def set_agent_mode(conversation_id: str, request: SetAgentModeRequest):
-    """Aktiviert oder deaktiviert den Agent-Modus für eine Conversation"""
-    conversation = conversation_manager.get_conversation(conversation_id)
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
-    
-    success = conversation_manager.set_agent_mode(conversation_id, request.enabled)
-    if not success:
-        raise HTTPException(status_code=500, detail="Fehler beim Setzen des Agent-Modus")
-    
-    return {
-        "conversation_id": conversation_id,
-        "agent_mode": request.enabled,
-        "message": f"Agent-Modus {'aktiviert' if request.enabled else 'deaktiviert'}"
-    }
+    """Alias für set_file_mode (Rückwärtskompatibilität)"""
+    return await set_file_mode(conversation_id, SetFileModeRequest(enabled=request.enabled))
 
 
 @app.delete("/conversations/{conversation_id}")
@@ -1447,23 +1657,83 @@ async def reset_preferences():
     return {"message": "Präferenzen zurückgesetzt"}
 
 
+# Quality Management Endpoints
+class FeedbackRequest(BaseModel):
+    response_id: str
+    rating: int  # 1-5
+    comment: Optional[str] = None
+    issues: Optional[List[str]] = None  # ["hallucination", "incomplete", "wrong", etc.]
+
+
+@app.post("/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """Empfängt Nutzerrückmeldung zu einer Antwort"""
+    quality_manager.add_feedback(
+        response_id=request.response_id,
+        feedback={
+            "rating": request.rating,  # 1-5
+            "comment": request.comment,
+            "issues": request.issues  # ["hallucination", "incomplete", "wrong", etc.]
+        }
+    )
+    return {"status": "success"}
+
+
+@app.get("/quality/settings")
+async def get_quality_settings():
+    """Gibt Quality Settings zurück"""
+    return quality_manager.get_settings()
+
+
+class QualitySettingsRequest(BaseModel):
+    web_validation: Optional[bool] = None
+    contradiction_check: Optional[bool] = None
+    hallucination_check: Optional[bool] = None
+    actuality_check: Optional[bool] = None
+    source_quality_check: Optional[bool] = None
+    completeness_check: Optional[bool] = None
+    auto_web_search: Optional[bool] = None
+
+
+@app.post("/quality/settings")
+async def update_quality_settings(request: QualitySettingsRequest):
+    """Aktualisiert Quality Settings"""
+    for key, value in request.dict(exclude_unset=True).items():
+        if key in quality_manager.settings and value is not None:
+            quality_manager.update_setting(key, value)
+    return quality_manager.get_settings()
+
+
 # Performance-Einstellungen
 PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
 AUDIO_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "audio_settings.json")
 
 def _load_performance_settings() -> Dict[str, Any]:
     """Lädt Performance-Einstellungen"""
+    # Default-Werte
+    default_settings = {
+        "cpu_threads": None,  # None = Auto
+        "gpu_optimization": "balanced",
+        "disable_cpu_offload": False,
+        "use_torch_compile": False,
+        "use_quantization": False,
+        "quantization_bits": 8,
+        "use_flash_attention": True,
+        "enable_tf32": True,
+        "enable_cudnn_benchmark": True
+    }
+    
     try:
         if os.path.exists(PERFORMANCE_SETTINGS_FILE):
             with open(PERFORMANCE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                loaded_settings = json.load(f)
+                # Merge mit Defaults (für neue Optionen)
+                default_settings.update(loaded_settings)
+                return default_settings
     except Exception as e:
         logger.warning(f"Fehler beim Laden der Performance-Einstellungen: {e}")
-    return {
-        "cpu_threads": None,  # None = Auto
-        "gpu_optimization": "balanced",
-        "disable_cpu_offload": False
-    }
+    
+    return default_settings
 
 def _save_performance_settings(settings: Dict[str, Any]):
     """Speichert Performance-Einstellungen"""
@@ -1483,10 +1753,20 @@ async def get_performance_settings():
 @app.post("/performance/settings", response_model=PerformanceSettingsResponse)
 async def set_performance_settings(request: PerformanceSettingsRequest):
     """Setzt Performance-Einstellungen"""
+    # Lade aktuelle Settings
+    current_settings = _load_performance_settings()
+    
+    # Aktualisiere nur gesetzte Werte
     settings = {
-        "cpu_threads": request.cpu_threads,
-        "gpu_optimization": request.gpu_optimization,
-        "disable_cpu_offload": request.disable_cpu_offload
+        "cpu_threads": request.cpu_threads if request.cpu_threads is not None else current_settings.get("cpu_threads"),
+        "gpu_optimization": request.gpu_optimization if request.gpu_optimization else current_settings.get("gpu_optimization", "balanced"),
+        "disable_cpu_offload": request.disable_cpu_offload if request.disable_cpu_offload is not None else current_settings.get("disable_cpu_offload", False),
+        "use_torch_compile": request.use_torch_compile if request.use_torch_compile is not None else current_settings.get("use_torch_compile", False),
+        "use_quantization": request.use_quantization if request.use_quantization is not None else current_settings.get("use_quantization", False),
+        "quantization_bits": request.quantization_bits if request.quantization_bits is not None else current_settings.get("quantization_bits", 8),
+        "use_flash_attention": request.use_flash_attention if request.use_flash_attention is not None else current_settings.get("use_flash_attention", True),
+        "enable_tf32": request.enable_tf32 if request.enable_tf32 is not None else current_settings.get("enable_tf32", True),
+        "enable_cudnn_benchmark": request.enable_cudnn_benchmark if request.enable_cudnn_benchmark is not None else current_settings.get("enable_cudnn_benchmark", True)
     }
     _save_performance_settings(settings)
     

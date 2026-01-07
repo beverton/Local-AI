@@ -299,13 +299,14 @@ def call_agent(conversation_id: str, agent_id: str, message: str) -> str:
     return _agent_manager.call_agent(conversation_id, None, agent_id, message)
 
 
-def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
+def web_search(query: str, max_results: int = 5, timeout: float = 3.0) -> Dict[str, Any]:
     """
     Führt eine Websuche durch und gibt strukturierte Ergebnisse zurück
     
     Args:
         query: Die Suchanfrage
         max_results: Maximale Anzahl der Ergebnisse (Standard: 5)
+        timeout: Timeout in Sekunden (Standard: 3.0) - kurz um Blockierung zu vermeiden
         
     Returns:
         Dict mit "results" (Liste von Ergebnissen) und "summary"
@@ -313,6 +314,7 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     Note:
         Diese Funktion verwendet eine einfache Suchmaschinen-API oder
         kann erweitert werden für spezifische Suchmaschinen
+        WICHTIG: Hat kurzes Timeout um Server-Blockierung zu vermeiden
     """
     try:
         # Einfache Implementierung: Suche über DuckDuckGo HTML-Interface
@@ -322,7 +324,7 @@ def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=timeout)  # Kurzes Timeout um Blockierung zu vermeiden
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')

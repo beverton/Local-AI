@@ -1,5 +1,5 @@
 {
   "cpu_threads": 12,
-  "gpu_optimization": "speed",
+  "gpu_optimization": "balanced",
   "disable_cpu_offload": true
 }
