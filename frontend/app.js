@@ -130,6 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadPreferences();
     loadPerformanceSettings();
     loadAudioSettings();
+    loadQualitySettings();
     startSystemStatsUpdate();
     
     // Lade initialen Status einmalig (kein automatisches Polling mehr)
@@ -154,6 +155,45 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Event Listeners
+// Quality Settings Funktionen (müssen vor setupEventListeners definiert sein)
+async function loadQualitySettings() {
+    try {
+        const settings = await apiCall('/quality/settings');
+        const qualityWebValidation = document.getElementById('qualityWebValidation');
+        const qualityContradictionCheck = document.getElementById('qualityContradictionCheck');
+        const qualityHallucinationCheck = document.getElementById('qualityHallucinationCheck');
+        const qualityAutoWebSearch = document.getElementById('qualityAutoWebSearch');
+        
+        if (qualityWebValidation) qualityWebValidation.checked = settings.web_validation ?? true;
+        if (qualityContradictionCheck) qualityContradictionCheck.checked = settings.contradiction_check ?? true;
+        if (qualityHallucinationCheck) qualityHallucinationCheck.checked = settings.hallucination_check ?? true;
+        if (qualityAutoWebSearch) qualityAutoWebSearch.checked = settings.auto_web_search ?? true;
+    } catch (error) {
+        console.error('Fehler beim Laden der Quality Settings:', error);
+    }
+}
+
+async function saveQualitySettings() {
+    try {
+        const qualityWebValidation = document.getElementById('qualityWebValidation');
+        const qualityContradictionCheck = document.getElementById('qualityContradictionCheck');
+        const qualityHallucinationCheck = document.getElementById('qualityHallucinationCheck');
+        const qualityAutoWebSearch = document.getElementById('qualityAutoWebSearch');
+        
+        await apiCall('/quality/settings', {
+            method: 'POST',
+            body: JSON.stringify({
+                web_validation: qualityWebValidation ? qualityWebValidation.checked : true,
+                contradiction_check: qualityContradictionCheck ? qualityContradictionCheck.checked : true,
+                hallucination_check: qualityHallucinationCheck ? qualityHallucinationCheck.checked : true,
+                auto_web_search: qualityAutoWebSearch ? qualityAutoWebSearch.checked : true
+            })
+        });
+    } catch (error) {
+        console.error('Fehler beim Speichern der Quality Settings:', error);
+    }
+}
+
 function setupEventListeners() {
     btnSend.addEventListener('click', sendMessage);
     btnCancel.addEventListener('click', cancelGeneration);
@@ -183,6 +223,25 @@ function setupEventListeners() {
     }
     preferenceToggle.addEventListener('change', togglePreferenceLearning);
     btnResetPreferences.addEventListener('click', resetPreferences);
+    
+    // Quality Settings Event Listeners
+    const qualityWebValidation = document.getElementById('qualityWebValidation');
+    const qualityContradictionCheck = document.getElementById('qualityContradictionCheck');
+    const qualityHallucinationCheck = document.getElementById('qualityHallucinationCheck');
+    const qualityAutoWebSearch = document.getElementById('qualityAutoWebSearch');
+    
+    if (qualityWebValidation) {
+        qualityWebValidation.addEventListener('change', saveQualitySettings);
+    }
+    if (qualityContradictionCheck) {
+        qualityContradictionCheck.addEventListener('change', saveQualitySettings);
+    }
+    if (qualityHallucinationCheck) {
+        qualityHallucinationCheck.addEventListener('change', saveQualitySettings);
+    }
+    if (qualityAutoWebSearch) {
+        qualityAutoWebSearch.addEventListener('change', saveQualitySettings);
+    }
     temperatureSlider.addEventListener('input', (e) => {
         settings.temperature = parseFloat(e.target.value);
         temperatureValue.textContent = settings.temperature.toFixed(1);
@@ -422,27 +481,14 @@ async function apiCall(endpoint, options = {}) {
             fetchOptions.signal = options.signal;
         }
         
-        // #region agent log
-        try {
-            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:172','message':'BEFORE fetch','data':{endpoint:endpoint},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        } catch(e) {}
-        // #endregion
+        // Debug-Logging entfernt (Port 7244 Service nicht verfügbar)
         const response = await fetch(`${API_BASE}${endpoint}`, fetchOptions);
-        // #region agent log
-        try {
-            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:174','message':'AFTER fetch','data':{endpoint:endpoint,status:response.status,ok:response.ok},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        } catch(e) {}
-        // #endregion
         
         if (!response.ok) {
             // Prüfe ob es ein "model_loading" Status ist (202 Accepted)
             if (response.status === 202) {
                 const errorData = await response.json();
-                // #region agent log
-                try {
-                    fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:178','message':'202 response with model_loading','data':{endpoint:endpoint,errorData:errorData},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-                } catch(e) {}
-                // #endregion
+                // Debug-Logging entfernt
                 if (errorData.detail && errorData.detail.status === "model_loading") {
                     throw { name: "ModelLoading", detail: errorData.detail };
                 }
@@ -453,11 +499,7 @@ async function apiCall(endpoint, options = {}) {
         
         return await response.json();
     } catch (error) {
-        // #region agent log
-        try {
-            fetch('http://127.0.0.1:7244/ingest/6342dbba-2a61-4db1-99f0-60985bbd1225',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:187','message':'apiCall catch block','data':{endpoint:endpoint,errorName:error.name,errorMessage:error.message,errorType:error.constructor.name,isAbortError:error.name==='AbortError',isTypeError:error instanceof TypeError,isNetworkError:error.message&&(error.message.includes('Failed to fetch')||error.message.includes('NetworkError')||error.message.includes('CONNECTION_REFUSED'))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        } catch(e) {}
-        // #endregion
+        // Debug-Logging entfernt
         console.error('API Error:', error);
         
         // Behandle spezifische Fehlertypen

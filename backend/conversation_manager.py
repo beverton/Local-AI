@@ -50,21 +50,22 @@ class ConversationManager:
             "messages": [],
             "model_id": model_id,  # Modell pro Conversation
             "conversation_type": conversation_type,  # Typ der Conversation
-            "agent_mode": False  # Agent-Modus (Standard: deaktiviert)
+            "file_mode": False  # File-Mode (nur Datei-Operationen, Standard: deaktiviert)
         }
         
         self._save_conversation(conversation)
         logger.info(f"Neue Conversation erstellt: {conversation_id}")
         return conversation_id
     
-    def add_message(self, conversation_id: str, role: str, content: str) -> bool:
+    def add_message(self, conversation_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
-        Fügt eine Nachricht zu einer Conversation hinzu
+        Fügt eine Nachricht zu einer Conversation hinzu mit optionalen Metadaten (Quellen, Quality-Info, etc.)
         
         Args:
             conversation_id: Die ID der Conversation
             role: "user" oder "assistant"
             content: Der Nachrichteninhalt
+            metadata: Optionale Metadaten (z.B. sources, quality, response_id)
             
         Returns:
             True wenn erfolgreich
@@ -78,6 +79,9 @@ class ConversationManager:
             "content": content,
             "timestamp": datetime.now().isoformat()
         }
+        
+        if metadata:
+            message["metadata"] = metadata  # Enthält: sources, quality, response_id, etc.
         
         conversation["messages"].append(message)
         conversation["updated_at"] = datetime.now().isoformat()
@@ -221,13 +225,14 @@ class ConversationManager:
             return None
         return conversation.get("model_id")
     
-    def set_agent_mode(self, conversation_id: str, enabled: bool) -> bool:
+    def set_file_mode(self, conversation_id: str, enabled: bool) -> bool:
         """
-        Aktiviert oder deaktiviert den Agent-Modus für eine Conversation
+        Aktiviert oder deaktiviert den File-Mode für eine Conversation (nur Datei-Operationen)
+        Web-Search ist immer aktiv (über Quality Management)
         
         Args:
             conversation_id: Die ID der Conversation
-            enabled: True um Agent-Modus zu aktivieren, False um zu deaktivieren
+            enabled: True um File-Mode zu aktivieren, False um zu deaktivieren
             
         Returns:
             True wenn erfolgreich
@@ -236,26 +241,35 @@ class ConversationManager:
         if not conversation:
             return False
         
-        conversation["agent_mode"] = enabled
+        conversation["file_mode"] = enabled
         conversation["updated_at"] = datetime.now().isoformat()
         self._save_conversation(conversation)
-        logger.info(f"Agent-Modus für Conversation {conversation_id} gesetzt: {enabled}")
+        logger.info(f"File-Mode für Conversation {conversation_id} gesetzt: {enabled}")
         return True
     
-    def get_agent_mode(self, conversation_id: str) -> bool:
+    def get_file_mode(self, conversation_id: str) -> bool:
         """
-        Gibt den Agent-Modus-Status einer Conversation zurück
+        Gibt den File-Mode-Status einer Conversation zurück
         
         Args:
             conversation_id: Die ID der Conversation
             
         Returns:
-            True wenn Agent-Modus aktiviert ist, False sonst (auch wenn Conversation nicht existiert)
+            True wenn File-Mode aktiviert ist, False sonst (auch wenn Conversation nicht existiert)
         """
         conversation = self.get_conversation(conversation_id)
         if not conversation:
             return False
-        return conversation.get("agent_mode", False)
+        return conversation.get("file_mode", False)
+    
+    # Alias für Rückwärtskompatibilität (wird später entfernt)
+    def set_agent_mode(self, conversation_id: str, enabled: bool) -> bool:
+        """Alias für set_file_mode (Rückwärtskompatibilität)"""
+        return self.set_file_mode(conversation_id, enabled)
+    
+    def get_agent_mode(self, conversation_id: str) -> bool:
+        """Alias für get_file_mode (Rückwärtskompatibilität)"""
+        return self.get_file_mode(conversation_id)
     
     def _save_conversation(self, conversation: Dict[str, Any]):
         """Speichert eine Conversation in eine JSON-Datei"""

@@ -3,6 +3,7 @@ Model Manager - Verwaltet das Laden und Wechseln von AI-Modellen
 """
 import json
 import os
+import time
 from typing import Optional, Dict, Any, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
@@ -26,6 +27,9 @@ class ModelManager:
         
         # Lade Performance-Einstellungen
         self._apply_performance_settings()
+        
+        # Wende GPU-Optimierungen an
+        self._apply_gpu_optimizations()
     
     def _load_config(self) -> Dict[str, Any]:
         """Lädt die Konfiguration aus config.json"""
@@ -57,6 +61,26 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"Fehler beim Anwenden der Performance-Einstellungen: {e}")
     
+    def _apply_gpu_optimizations(self):
+        """Wendet GPU-Optimierungen an (cudnn.benchmark, tf32)"""
+        if self.device == "cuda":
+            # CUDNN Benchmark für konsistente Input-Größen
+            torch.backends.cudnn.benchmark = True
+            logger.info("CUDNN Benchmark aktiviert")
+            
+            # TF32 für Ampere+ GPUs (RTX 30xx, A100, etc.)
+            if torch.cuda.is_available():
+                try:
+                    props = torch.cuda.get_device_properties(0)
+                    compute_cap = props.major * 10 + props.minor
+                    if compute_cap >= 80:  # Ampere (8.0) oder höher
+                        torch.backends.cuda.matmul.allow_tf32 = True
+                        logger.info(f"TF32 aktiviert für Ampere+ GPU (Compute Capability: {compute_cap})")
+                    else:
+                        logger.info(f"TF32 nicht verfügbar für GPU (Compute Capability: {compute_cap}, benötigt >= 8.0)")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Prüfen der GPU-Generation für TF32: {e}")
+    
     def get_available_models(self) -> Dict[str, Dict[str, Any]]:
         """Gibt alle verfügbaren Modelle zurück"""
         return self.config.get("models", {})
@@ -68,6 +92,62 @@ class ModelManager:
     def is_model_loaded(self) -> bool:
         """Prüft ob ein Modell geladen ist"""
         return self.model is not None and self.tokenizer is not None
+    
+    def health_check(self, timeout: float = 5.0) -> Dict[str, Any]:
+        """
+        Prüft ob Modell wirklich funktioniert (echte Funktionsprüfung)
+        
+        Args:
+            timeout: Timeout in Sekunden für Health-Check
+            
+        Returns:
+            {
+                "healthy": bool,
+                "response_time_ms": float,
+                "error": Optional[str],
+                "last_check": float
+            }
+        """
+        if not self.is_model_loaded():
+            return {
+                "healthy": False,
+                "response_time_ms": 0,
+                "error": "Modell nicht geladen",
+                "last_check": time.time()
+            }
+        
+        try:
+            import time
+            start_time = time.time()
+            
+            # Test mit minimalem Prompt
+            test_messages = [{"role": "user", "content": "Test"}]
+            response = self.generate(test_messages, max_length=10, temperature=0.0)
+            
+            response_time = (time.time() - start_time) * 1000
+            
+            # Prüfe ob Antwort valide ist
+            if response and len(response) > 0 and response_time < timeout * 1000:
+                return {
+                    "healthy": True,
+                    "response_time_ms": response_time,
+                    "error": None,
+                    "last_check": time.time()
+                }
+            else:
+                return {
+                    "healthy": False,
+                    "response_time_ms": response_time,
+                    "error": f"Antwort ungültig oder zu langsam ({response_time:.0f}ms)",
+                    "last_check": time.time()
+                }
+        except Exception as e:
+            return {
+                "healthy": False,
+                "response_time_ms": 0,
+                "error": str(e),
+                "last_check": time.time()
+            }
     
     def load_model(self, model_id: str) -> bool:
         """
@@ -102,22 +182,132 @@ class ModelManager:
             
             logger.info(f"Lade Modell: {model_id} von {model_path}")
             
+            # Prüfe Performance-Settings für Flash Attention 2
+            perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
+            use_flash_attention = True  # Default
+            if os.path.exists(perf_settings_path):
+                try:
+                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
+                        perf_settings = json.load(f)
+                        use_flash_attention = perf_settings.get("use_flash_attention", True)
+                except:
+                    pass
+            
+            # Prüfe ob Flash Attention 2 verfügbar ist
+            flash_attention_available = False
+            if use_flash_attention:
+                try:
+                    from flash_attn import flash_attn_func
+                    flash_attention_available = True
+                    logger.info("Flash Attention 2 ist verfügbar")
+                except ImportError:
+                    logger.info("Flash Attention 2 nicht verfügbar, verwende Standard-Attention")
+            
             # Tokenizer laden
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
                 trust_remote_code=True
             )
             
+            # Prüfe Performance-Settings für Quantisierung
+            use_quantization = False
+            quantization_bits = 8
+            try:
+                perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
+                if os.path.exists(perf_settings_path):
+                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
+                        perf_settings = json.load(f)
+                        use_quantization = perf_settings.get("use_quantization", False)
+                        quantization_bits = perf_settings.get("quantization_bits", 8)
+            except:
+                pass
+            
             # Modell laden
+            model_kwargs = {
+                "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+                "device_map": "auto" if self.device == "cuda" else None,
+                "trust_remote_code": True
+            }
+            
+            # Quantisierung (8-bit/4-bit) mit bitsandbytes
+            if use_quantization and self.device == "cuda":
+                try:
+                    from transformers import BitsAndBytesConfig
+                    
+                    if quantization_bits == 8:
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_8bit=True,
+                            bnb_8bit_compute_dtype=torch.bfloat16
+                        )
+                        logger.info("8-bit Quantisierung wird verwendet")
+                    elif quantization_bits == 4:
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_quant_type="nf4"
+                        )
+                        logger.info("4-bit Quantisierung wird verwendet")
+                    else:
+                        logger.warning(f"Unbekannte Quantisierungs-Bits: {quantization_bits}, verwende 8-bit")
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_8bit=True,
+                            bnb_8bit_compute_dtype=torch.bfloat16
+                        )
+                    
+                    model_kwargs["quantization_config"] = quantization_config
+                except ImportError:
+                    logger.warning("bitsandbytes nicht verfügbar, Quantisierung wird übersprungen")
+                except Exception as e:
+                    logger.warning(f"Fehler bei Quantisierung: {e}, verwende unquantisiertes Modell")
+            
+            # Flash Attention 2 wird automatisch von Transformers verwendet wenn verfügbar
+            # Wir müssen nur sicherstellen, dass es aktiviert ist
+            if flash_attention_available:
+                # Transformers aktiviert Flash Attention automatisch wenn verfügbar
+                # Für explizite Aktivierung können wir attn_implementation setzen (Transformers 4.36+)
+                try:
+                    model_kwargs["attn_implementation"] = "flash_attention_2"
+                    logger.info("Flash Attention 2 wird für Modell-Laden aktiviert")
+                except:
+                    # Fallback wenn attn_implementation nicht unterstützt wird
+                    logger.debug("attn_implementation nicht unterstützt, Flash Attention wird automatisch verwendet wenn verfügbar")
+            
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-                device_map="auto" if self.device == "cuda" else None,
-                trust_remote_code=True
+                **model_kwargs
             )
             
             if self.device == "cpu":
                 self.model = self.model.to(self.device)
+            
+            # Prüfe Performance-Settings für torch.compile()
+            use_torch_compile = False
+            try:
+                perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
+                if os.path.exists(perf_settings_path):
+                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
+                        perf_settings = json.load(f)
+                        use_torch_compile = perf_settings.get("use_torch_compile", False)
+            except:
+                pass
+            
+            # torch.compile() Support (PyTorch 2.0+)
+            if use_torch_compile:
+                try:
+                    # Prüfe PyTorch Version
+                    torch_version = torch.__version__.split('.')
+                    major_version = int(torch_version[0])
+                    minor_version = int(torch_version[1]) if len(torch_version) > 1 else 0
+                    
+                    if major_version >= 2:
+                        # Kompiliere Modell für bessere Performance
+                        self.model = torch.compile(self.model, mode="reduce-overhead")
+                        logger.info("Modell mit torch.compile() optimiert")
+                    else:
+                        logger.warning(f"torch.compile() erfordert PyTorch 2.0+, aktuelle Version: {torch.__version__}")
+                except Exception as e:
+                    logger.warning(f"Fehler bei torch.compile(): {e}, verwende unkompiliertes Modell")
             
             self.current_model_id = model_id
             logger.info(f"Modell erfolgreich geladen: {model_id}")
@@ -129,9 +319,163 @@ class ModelManager:
             self.tokenizer = None
             return False
     
-    def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3) -> str:
+    def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, max_retries: int = 2) -> str:
         """
-        Generiert eine Antwort basierend auf Messages (Chat-Format)
+        Generiert eine Antwort basierend auf Messages (Chat-Format) mit Validierung und Retry-Mechanismus
+        
+        Args:
+            messages: Liste von Messages im Format [{"role": "user", "content": "..."}, ...]
+            max_length: Maximale Länge der Antwort
+            temperature: Kreativität (0.0 = deterministisch, 1.0 = kreativ) - niedriger = konsistenter
+            max_retries: Maximale Anzahl von Retries bei ungültigen Antworten
+            
+        Returns:
+            Die generierte Antwort (garantiert nicht leer)
+        """
+        if not self.is_model_loaded():
+            raise RuntimeError("Kein Modell geladen!")
+        
+        current_max_length = max_length
+        for attempt in range(max_retries + 1):
+            try:
+                # Normale Generierung
+                response = self._generate_internal(messages, current_max_length, temperature)
+                
+                # Validierung
+                if self._validate_response(response, messages):
+                    # Response ist gültig, prüfe Vollständigkeit
+                    completeness = self._check_completeness(response, messages)
+                    if completeness["complete"]:
+                        return response
+                    else:
+                        # Response ist unvollständig
+                        if attempt < max_retries and completeness.get("suggested_max_length"):
+                            logger.warning(f"Response unvollständig: {completeness['reason']}, retry mit max_length={completeness['suggested_max_length']}")
+                            current_max_length = completeness["suggested_max_length"]
+                            continue
+                        else:
+                            # Response ist unvollständig, aber keine Retries mehr
+                            logger.warning(f"Response unvollständig, aber keine Retries mehr: {completeness['reason']}")
+                            return response  # Gebe trotzdem zurück, da teilweise gültig
+                else:
+                    logger.warning(f"Ungültige Response bei Versuch {attempt + 1}/{max_retries + 1}, retry...")
+                    if attempt < max_retries:
+                        # Erhöhe max_length für Retry
+                        current_max_length = int(current_max_length * 1.5)
+                        continue
+                    else:
+                        # Letzter Versuch fehlgeschlagen - Exception werfen statt Fallback
+                        raise RuntimeError("Konnte nach mehreren Versuchen keine gültige Antwort generieren")
+            except Exception as e:
+                logger.error(f"Fehler bei Generierung (Versuch {attempt + 1}): {e}")
+                if attempt < max_retries:
+                    current_max_length = int(current_max_length * 1.5)
+                    continue
+                else:
+                    raise
+        
+        # Sollte nie erreicht werden
+        raise RuntimeError("Konnte nach mehreren Versuchen keine gültige Antwort generieren")
+    
+    def _validate_response(self, response: str, messages: List[Dict[str, str]]) -> bool:
+        """
+        Validiert ob Response gültig ist
+        
+        Returns:
+            True wenn Response gültig, False sonst
+        """
+        # Prüfe ob Response leer ist
+        if not response or len(response.strip()) == 0:
+            return False
+        
+        # Prüfe ob Response nur Whitespace ist
+        if response.strip() == "":
+            return False
+        
+        # Prüfe ob Response zu kurz ist (wahrscheinlich abgeschnitten)
+        if len(response.strip()) < 10:
+            return False
+        
+        # Prüfe ob Response vollständig ist (endet mit Satzzeichen oder ist vollständiger Satz)
+        response_stripped = response.strip()
+        if not response_stripped[-1] in ['.', '!', '?', ':', ';']:
+            # Prüfe ob letztes Wort vollständig ist (kein abgeschnittenes Wort)
+            words = response_stripped.split()
+            if words:
+                last_word = words[-1]
+                if len(last_word) < 3:  # Sehr kurzes letztes Wort = wahrscheinlich abgeschnitten
+                    return False
+        
+        # Prüfe ob Response nicht nur System-Prompt-Phrasen enthält
+        system_phrases = ["du bist ein hilfreicher", "ai-assistent", "antworte klar"]
+        if all(phrase in response.lower() for phrase in system_phrases) and len(response.strip()) < 50:
+            return False
+        
+        # Prüfe ob Response nicht nur die User-Nachricht wiederholt
+        if messages:
+            last_user = next((msg for msg in reversed(messages) if msg["role"] == "user"), None)
+            if last_user and last_user["content"].strip().lower() == response.strip().lower():
+                return False
+        
+        return True
+    
+    def _check_completeness(self, response: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Prüft ob Response vollständig ist
+        
+        Returns:
+            {
+                "complete": bool,
+                "reason": str,
+                "suggested_max_length": Optional[int]
+            }
+        """
+        response_stripped = response.strip()
+        
+        # Prüfe ob Response mit unvollständigem Satz endet
+        incomplete_indicators = [
+            response_stripped.endswith(','),
+            response_stripped.endswith('und'),
+            response_stripped.endswith('oder'),
+            response_stripped.endswith('aber'),
+        ]
+        
+        # Prüfe auf unvollständige Wörter (abgeschnitten)
+        words = response_stripped.split()
+        if words:
+            last_word = words[-1]
+            if len(last_word) < 3:  # Sehr kurzes letztes Wort = wahrscheinlich abgeschnitten
+                incomplete_indicators.append(True)
+        
+        if any(incomplete_indicators):
+            return {
+                "complete": False,
+                "reason": "Response endet mit unvollständigem Satz/Wort",
+                "suggested_max_length": len(response_stripped.split()) * 2  # Doppelte Länge
+            }
+        
+        # Prüfe ob Response zu kurz ist für die Frage
+        # (Wenn Frage lang ist, sollte Antwort auch eine gewisse Länge haben)
+        if messages:
+            last_user = next((msg for msg in reversed(messages) if msg["role"] == "user"), None)
+            if last_user:
+                question_length = len(last_user["content"])
+                if len(response_stripped) < 50 and len(response_stripped.split()) < 10 and question_length > 50:
+                    return {
+                        "complete": False,
+                        "reason": "Response zu kurz für vollständige Antwort",
+                        "suggested_max_length": 1024
+                    }
+        
+        return {
+            "complete": True,
+            "reason": "Response erscheint vollständig",
+            "suggested_max_length": None
+        }
+    
+    def _generate_internal(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3) -> str:
+        """
+        Interne Generierungsmethode (ohne Validierung/Retry)
         
         Args:
             messages: Liste von Messages im Format [{"role": "user", "content": "..."}, ...]
@@ -141,9 +485,6 @@ class ModelManager:
         Returns:
             Die generierte Antwort
         """
-        if not self.is_model_loaded():
-            raise RuntimeError("Kein Modell geladen!")
-        
         try:
             # Verwende Chat-Template wenn verfügbar (für Qwen, Phi-3, etc.)
             if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
@@ -172,7 +513,19 @@ class ModelManager:
                 original_prompt = prompt
             
             # Tokenize
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            inputs = self.tokenizer(prompt, return_tensors="pt")
+            # Stelle sicher, dass alle Inputs auf dem richtigen Device sind
+            # WICHTIG: Wenn device_map="auto" verwendet wird, müssen Inputs auf dem ersten Device sein
+            if hasattr(self.model, 'device'):
+                # Modell hat ein device-Attribut (wenn device_map nicht verwendet wird)
+                inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            elif hasattr(self.model, 'hf_device_map') and self.model.hf_device_map:
+                # Modell verwendet device_map="auto" - Inputs auf erstes Device
+                first_device = list(self.model.hf_device_map.values())[0]
+                inputs = {k: v.to(first_device) for k, v in inputs.items()}
+            else:
+                # Fallback: Verwende self.device
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
             input_length = inputs['input_ids'].shape[1]
             
             # Modell-spezifische Limits
@@ -204,7 +557,7 @@ class ModelManager:
             logger.info(f"Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
             
             # Generate mit besseren Parametern
-            with torch.no_grad():
+            with torch.inference_mode():
                 # Bestimme Modell-Typ für spezifische Behandlung
                 is_mistral = "mistral" in self.current_model_id.lower() if self.current_model_id else False
                 

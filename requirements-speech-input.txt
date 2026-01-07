@@ -1,0 +1,27 @@
+# Dependencies für Speech Input App
+# Installieren mit: pip install -r requirements-speech-input.txt
+#
+# HINWEIS: 
+# - requests ist bereits in requirements-base.txt enthalten
+# - scipy ist bereits in requirements-audio.txt enthalten
+# - numpy wird normalerweise von torch/transformers mitgebracht
+# Diese Datei enthält nur die zusätzlichen Dependencies für die Speech Input App
+
+# GUI Framework
+PyQt6>=6.6.0
+
+# Audio Recording
+sounddevice>=0.4.6
+# numpy>=1.24.0  # Wird normalerweise von torch/transformers mitgebracht, sollte bereits installiert sein
+# scipy>=1.11.0  # Bereits in requirements-audio.txt enthalten
+
+# Global Hotkeys
+keyboard>=0.13.5
+pyautogui>=0.9.54
+
+# Windows API
+pywin32>=306
+
+# HTTP Requests
+# requests>=2.31.0  # Bereits in requirements-base.txt
+

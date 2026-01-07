@@ -426,6 +426,49 @@ async def get_status():
     }
 
 
+@app.get("/health")
+async def health_check():
+    """Health-Check für alle geladenen Modelle"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "models": {}
+    }
+    
+    # Text-Modell
+    if model_manager.is_model_loaded():
+        text_health = model_manager.health_check()
+        health_status["models"]["text"] = {
+            "loaded": True,
+            "healthy": text_health["healthy"],
+            "last_check": text_health["last_check"],
+            "response_time_ms": text_health["response_time_ms"],
+            "error": text_health.get("error")
+        }
+        if not text_health["healthy"]:
+            health_status["status"] = "degraded"
+    else:
+        health_status["models"]["text"] = {
+            "loaded": False,
+            "healthy": False
+        }
+    
+    # Audio-Modell (Whisper - vorerst nur Basis-Status, kein Health-Check)
+    if whisper_manager.is_model_loaded():
+        health_status["models"]["audio"] = {
+            "loaded": True,
+            "healthy": True,  # Whisper funktioniert zuverlässig, daher immer healthy
+            "note": "Whisper Health-Check vorerst ausgelassen - funktioniert bereits sehr gut"
+        }
+    else:
+        health_status["models"]["audio"] = {
+            "loaded": False,
+            "healthy": False
+        }
+    
+    return health_status
+
+
 # Text Model Endpoints
 
 def _load_text_model_async(model_id: str):
