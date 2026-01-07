@@ -42,8 +42,9 @@ class AudioRecorder:
         self.on_segment_ready: Optional[Callable[[str], None]] = None  # Callback wenn Segment fertig ist
         self.silence_threshold = 0.02  # Schwellenwert für Stille (0.0-1.0) - erhöht für bessere Genauigkeit
         self.silence_duration = 1.0  # Sekunden Stille bevor Segment extrahiert wird
-        self.min_segment_duration = 0.5  # Minimale Segment-Dauer in Sekunden
-        self.trailing_silence_duration = 0.2  # Sekunden Stille am Ende des Segments (für bessere Transkription)
+        self.min_segment_duration = 1.0  # Minimale Segment-Dauer in Sekunden (erhöht für mehr Kontext)
+        self.trailing_silence_duration = 0.5  # Sekunden Stille am Ende des Segments (erhöht für bessere Transkription)
+        self.leading_silence_duration = 0.3  # Sekunden Stille am Anfang des Segments (für bessere Transkription)
         
         # Pause-Erkennung
         self.last_speech_time = None  # Zeitpunkt des letzten erkannten Sprechens
