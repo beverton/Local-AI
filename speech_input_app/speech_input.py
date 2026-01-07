@@ -135,9 +135,20 @@ class ConfigWindow(QWidget):
     def init_ui(self):
         """Initialisiert UI"""
         self.setWindowTitle("Speech Input - Einstellungen")
-        self.setFixedSize(500, 650)
+        self.setFixedSize(900, 700)  # Breiter, aber nicht so hoch
         
-        layout = QVBoxLayout()
+        # Haupt-Layout mit 2 Spalten
+        main_layout = QHBoxLayout()
+        
+        # Linke Spalte
+        left_column = QVBoxLayout()
+        left_column.setSpacing(10)
+        
+        # Rechte Spalte
+        right_column = QVBoxLayout()
+        right_column.setSpacing(10)
+        
+        layout = left_column  # Temporär für bestehenden Code
         
         # Hotkey
         hotkey_group = QGroupBox("Tastenkürzel")
@@ -205,7 +216,7 @@ class ConfigWindow(QWidget):
         self.main_key_input.textChanged.connect(self.update_hotkey_preview)
         
         hotkey_group.setLayout(hotkey_layout)
-        layout.addWidget(hotkey_group)
+        left_column.addWidget(hotkey_group)
         
         # Aufnahme-Modus
         mode_group = QGroupBox("Aufnahme-Modus")
@@ -218,7 +229,7 @@ class ConfigWindow(QWidget):
         mode_layout.addWidget(QLabel("Modus:"))
         mode_layout.addWidget(self.mode_combo)
         mode_group.setLayout(mode_layout)
-        layout.addWidget(mode_group)
+        left_column.addWidget(mode_group)
         
         # Verbinde Signal für Modus-Änderung
         self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
@@ -244,7 +255,7 @@ class ConfigWindow(QWidget):
         self.audio_level_bar.setValue(0)
         self.audio_level_bar.setFormat("%v%")
         self.audio_level_bar.setTextVisible(True)
-        self.audio_level_bar.setGeometry(0, 0, 500, 35)  # Wird später angepasst
+        # Wird dynamisch angepasst
         
         # Schwellenwert-Anzeige als Overlay (über dem Audio-Level-Balken)
         self.threshold_display_bar = QProgressBar(level_container)
@@ -254,7 +265,7 @@ class ConfigWindow(QWidget):
         self.threshold_display_bar.setValue(initial_threshold_value)
         self.threshold_display_bar.setFormat("")
         self.threshold_display_bar.setTextVisible(False)
-        self.threshold_display_bar.setGeometry(0, 0, 500, 35)  # Wird später angepasst
+        # Wird dynamisch angepasst
         # Transparent mit nur der Linie sichtbar
         self.threshold_display_bar.setStyleSheet("""
             QProgressBar {
@@ -314,9 +325,9 @@ class ConfigWindow(QWidget):
         threshold_layout.addLayout(threshold_slider_layout)
         
         threshold_group.setLayout(threshold_layout)
-        layout.addWidget(threshold_group)
+        left_column.addWidget(threshold_group)
         
-        # CONTINUOUS-Modus Einstellungen (Pause-Erkennung)
+        # CONTINUOUS-Modus Einstellungen (Pause-Erkennung) - in rechte Spalte
         continuous_group = QGroupBox("Segment-basierte Transkription (Continuous-Modus)")
         continuous_layout = QVBoxLayout()
         
@@ -376,8 +387,120 @@ class ConfigWindow(QWidget):
         silence_duration_info.setStyleSheet("font-size: 9pt; color: #666;")
         continuous_layout.addWidget(silence_duration_info)
         
+        continuous_layout.addWidget(QLabel(""))  # Abstand
+        continuous_layout.addWidget(QLabel("─" * 50))  # Trennlinie
+        continuous_layout.addWidget(QLabel(""))  # Abstand
+        
+        # Audio-Verarbeitung
+        audio_processing_label = QLabel("Audio-Verarbeitung (Experimentell)")
+        audio_processing_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        continuous_layout.addWidget(audio_processing_label)
+        
+        # Clipping-Schutz aktivieren/deaktivieren
+        self.clipping_protection_checkbox = QCheckBox("Clipping-Schutz aktivieren")
+        clipping_protection_enabled = self.config.get("clipping_protection", True)  # Standard: aktiviert
+        self.clipping_protection_checkbox.setChecked(clipping_protection_enabled)
+        continuous_layout.addWidget(self.clipping_protection_checkbox)
+        
+        # Info für Clipping-Schutz
+        clipping_info = QLabel("💡 Verhindert Audio-Clipping (Übersteuerung). Sollte normalerweise aktiviert bleiben.")
+        clipping_info.setWordWrap(True)
+        clipping_info.setStyleSheet("font-size: 9pt; color: #666;")
+        continuous_layout.addWidget(clipping_info)
+        
+        continuous_layout.addWidget(QLabel(""))  # Abstand
+        
+        # Normalisierung aktivieren/deaktivieren
+        self.normalize_checkbox = QCheckBox("Normalisierung aktivieren")
+        normalize_enabled = self.config.get("normalize_audio", True)  # Standard: aktiviert
+        self.normalize_checkbox.setChecked(normalize_enabled)
+        continuous_layout.addWidget(self.normalize_checkbox)
+        
+        # Normalisierungs-Level
+        normalize_level_layout = QHBoxLayout()
+        normalize_level_layout.addWidget(QLabel("Normalisierungs-Level:"))
+        self.normalize_level_slider = QSlider(Qt.Orientation.Horizontal)
+        self.normalize_level_slider.setMinimum(50)  # 0.5
+        self.normalize_level_slider.setMaximum(100)  # 1.0
+        initial_normalize_level = int(self.config.get("normalize_level", 1.0) * 100)
+        self.normalize_level_slider.setValue(initial_normalize_level)
+        self.normalize_level_label = QLabel(f"{self.config.get('normalize_level', 1.0):.2f}")
+        self.normalize_level_label.setMinimumWidth(50)
+        self.normalize_level_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        def update_normalize_level(v):
+            level_value = v / 100.0
+            self.normalize_level_label.setText(f"{level_value:.2f}")
+        
+        self.normalize_level_slider.valueChanged.connect(update_normalize_level)
+        normalize_level_layout.addWidget(self.normalize_level_slider)
+        normalize_level_layout.addWidget(self.normalize_level_label)
+        continuous_layout.addLayout(normalize_level_layout)
+        
+        # Info für Normalisierung
+        normalize_info = QLabel("💡 Normalisiert Audio auf einheitliches Level. 1.0 = maximale Lautstärke, niedrigere Werte = mehr Headroom")
+        normalize_info.setWordWrap(True)
+        normalize_info.setStyleSheet("font-size: 9pt; color: #666;")
+        continuous_layout.addWidget(normalize_info)
+        
+        continuous_layout.addWidget(QLabel(""))  # Abstand
+        
+        # Kompression aktivieren/deaktivieren
+        self.compress_checkbox = QCheckBox("Kompression aktivieren")
+        compress_enabled = self.config.get("compress_audio", False)  # Standard: deaktiviert
+        self.compress_checkbox.setChecked(compress_enabled)
+        continuous_layout.addWidget(self.compress_checkbox)
+        
+        # Kompressions-Ratio
+        compress_ratio_layout = QHBoxLayout()
+        compress_ratio_layout.addWidget(QLabel("Kompressions-Ratio:"))
+        self.compress_ratio_slider = QSlider(Qt.Orientation.Horizontal)
+        self.compress_ratio_slider.setMinimum(10)  # 1.0 (keine Kompression)
+        self.compress_ratio_slider.setMaximum(100)  # 10.0 (starke Kompression)
+        initial_compress_ratio = int(self.config.get("compress_ratio", 2.0) * 10)
+        self.compress_ratio_slider.setValue(initial_compress_ratio)
+        self.compress_ratio_label = QLabel(f"{self.config.get('compress_ratio', 2.0):.1f}:1")
+        self.compress_ratio_label.setMinimumWidth(50)
+        self.compress_ratio_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        def update_compress_ratio(v):
+            ratio_value = v / 10.0
+            self.compress_ratio_label.setText(f"{ratio_value:.1f}:1")
+        
+        self.compress_ratio_slider.valueChanged.connect(update_compress_ratio)
+        compress_ratio_layout.addWidget(self.compress_ratio_slider)
+        compress_ratio_layout.addWidget(self.compress_ratio_label)
+        continuous_layout.addLayout(compress_ratio_layout)
+        
+        # Kompressions-Threshold
+        compress_threshold_layout = QHBoxLayout()
+        compress_threshold_layout.addWidget(QLabel("Kompressions-Threshold:"))
+        self.compress_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.compress_threshold_slider.setMinimum(10)  # 0.1
+        self.compress_threshold_slider.setMaximum(100)  # 1.0
+        initial_compress_threshold = int(self.config.get("compress_threshold", 0.5) * 100)
+        self.compress_threshold_slider.setValue(initial_compress_threshold)
+        self.compress_threshold_label = QLabel(f"{self.config.get('compress_threshold', 0.5):.2f}")
+        self.compress_threshold_label.setMinimumWidth(50)
+        self.compress_threshold_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        def update_compress_threshold(v):
+            threshold_value = v / 100.0
+            self.compress_threshold_label.setText(f"{threshold_value:.2f}")
+        
+        self.compress_threshold_slider.valueChanged.connect(update_compress_threshold)
+        compress_threshold_layout.addWidget(self.compress_threshold_slider)
+        compress_threshold_layout.addWidget(self.compress_threshold_label)
+        continuous_layout.addLayout(compress_threshold_layout)
+        
+        # Info für Kompression
+        compress_info = QLabel("💡 Kompression reduziert dynamische Range. Höhere Ratio = stärkere Kompression. Threshold = ab welchem Level komprimiert wird")
+        compress_info.setWordWrap(True)
+        compress_info.setStyleSheet("font-size: 9pt; color: #666;")
+        continuous_layout.addWidget(compress_info)
+        
         continuous_group.setLayout(continuous_layout)
-        layout.addWidget(continuous_group)
+        right_column.addWidget(continuous_group)
         
         # Speichere Referenz für Sichtbarkeit
         self.continuous_group = continuous_group
@@ -392,7 +515,7 @@ class ConfigWindow(QWidget):
         self.level_monitor_timer.timeout.connect(self.update_audio_level_display)
         self.start_audio_level_monitoring()
         
-        # Sprache
+        # Sprache - in rechte Spalte
         language_group = QGroupBox("Sprache")
         language_layout = QVBoxLayout()
         self.language_combo = QComboBox()
@@ -427,25 +550,43 @@ class ConfigWindow(QWidget):
         language_layout.addWidget(QLabel("Sprache:"))
         language_layout.addWidget(self.language_combo)
         language_group.setLayout(language_layout)
-        layout.addWidget(language_group)
+        right_column.addWidget(language_group)
         
-        # Auto-Start
+        # Auto-Start - in rechte Spalte
         auto_start_check = QCheckBox("Beim Windows-Start starten")
         auto_start_check.setChecked(self.config.get("auto_start", False))
         self.auto_start_check = auto_start_check
-        layout.addWidget(auto_start_check)
+        right_column.addWidget(auto_start_check)
         
-        # Buttons
+        # Stretch für rechte Spalte
+        right_column.addStretch()
+        
+        # Füge beide Spalten zum Haupt-Layout hinzu
+        left_widget = QWidget()
+        left_widget.setLayout(left_column)
+        right_widget = QWidget()
+        right_widget.setLayout(right_column)
+        
+        main_layout.addWidget(left_widget, 1)
+        main_layout.addWidget(right_widget, 1)
+        
+        # Buttons unten zentriert
         button_layout = QHBoxLayout()
+        button_layout.addStretch()
         save_btn = QPushButton("Speichern")
         save_btn.clicked.connect(self.save_and_close)
         cancel_btn = QPushButton("Abbrechen")
         cancel_btn.clicked.connect(self.close)
         button_layout.addWidget(save_btn)
         button_layout.addWidget(cancel_btn)
-        layout.addLayout(button_layout)
+        button_layout.addStretch()
         
-        self.setLayout(layout)
+        # Haupt-Layout mit Buttons
+        final_layout = QVBoxLayout()
+        final_layout.addLayout(main_layout)
+        final_layout.addLayout(button_layout)
+        
+        self.setLayout(final_layout)
     
     def _extract_main_key(self, hotkey: str) -> str:
         """Extrahiert Haupttaste aus Hotkey-String"""
@@ -697,6 +838,13 @@ class ConfigWindow(QWidget):
         if self.config["recording_mode"] == "continuous":
             self.config["silence_threshold"] = self.silence_threshold_slider.value() / 1000.0
             self.config["silence_duration"] = self.silence_duration_slider.value() / 10.0
+            # Audio-Verarbeitung
+            self.config["clipping_protection"] = self.clipping_protection_checkbox.isChecked()
+            self.config["normalize_audio"] = self.normalize_checkbox.isChecked()
+            self.config["normalize_level"] = self.normalize_level_slider.value() / 100.0
+            self.config["compress_audio"] = self.compress_checkbox.isChecked()
+            self.config["compress_ratio"] = self.compress_ratio_slider.value() / 10.0
+            self.config["compress_threshold"] = self.compress_threshold_slider.value() / 100.0
         else:
             # Setze Standardwerte falls nicht vorhanden (für später)
             if "silence_threshold" not in self.config:
@@ -960,10 +1108,17 @@ class SpeechInputApp:
         self.recorder.set_mode(mode)
         self.recorder.set_threshold(self.config.get("threshold", 0.5))
         
-        # Für CONTINUOUS-Modus: Setze Pause-Erkennung
+        # Für CONTINUOUS-Modus: Setze Pause-Erkennung und Audio-Verarbeitung
         if mode == RecordingMode.CONTINUOUS:
             self.recorder.set_silence_threshold(self.config.get("silence_threshold", 0.01))
             self.recorder.set_silence_duration(self.config.get("silence_duration", 1.0))
+            # Audio-Verarbeitung
+            self.recorder.set_clipping_protection(self.config.get("clipping_protection", True))
+            self.recorder.set_normalize_audio(self.config.get("normalize_audio", True))
+            self.recorder.set_normalize_level(self.config.get("normalize_level", 1.0))
+            self.recorder.set_compress_audio(self.config.get("compress_audio", False))
+            self.recorder.set_compress_ratio(self.config.get("compress_ratio", 2.0))
+            self.recorder.set_compress_threshold(self.config.get("compress_threshold", 0.5))
     
     def setup_hotkey(self):
         """Setzt Hotkey"""

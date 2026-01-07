@@ -1,10 +1,16 @@
 {
   "hotkey": "alt+1",
-  "recording_mode": "toggle",
+  "recording_mode": "continuous",
   "threshold": 0.0,
-  "language": "de",
+  "language": "",
   "auto_start": true,
   "api_base": "http://127.0.0.1:8000",
-  "silence_threshold": 0.01,
-  "silence_duration": 1.0
+  "silence_threshold": 0.001,
+  "silence_duration": 1.0,
+  "normalize_audio": false,
+  "normalize_level": 0.86,
+  "compress_audio": false,
+  "compress_ratio": 4.0,
+  "compress_threshold": 0.4,
+  "clipping_protection": false
 }
