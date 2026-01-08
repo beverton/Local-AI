@@ -223,8 +223,9 @@ class ModelManager:
                 pass
             
             # Modell laden
+            # FIX: Verwende float16 statt bfloat16 - bfloat16 mit device_map="auto" führt zu "meta" device state
             model_kwargs = {
-                "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+                "torch_dtype": torch.float16 if self.device == "cuda" else torch.float32,
                 "device_map": "auto" if self.device == "cuda" else None,
                 "trust_remote_code": True
             }
@@ -237,13 +238,13 @@ class ModelManager:
                     if quantization_bits == 8:
                         quantization_config = BitsAndBytesConfig(
                             load_in_8bit=True,
-                            bnb_8bit_compute_dtype=torch.bfloat16
+                            bnb_8bit_compute_dtype=torch.float16  # FIX: float16 statt bfloat16
                         )
                         logger.info("8-bit Quantisierung wird verwendet")
                     elif quantization_bits == 4:
                         quantization_config = BitsAndBytesConfig(
                             load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.bfloat16,
+                            bnb_4bit_compute_dtype=torch.float16,  # FIX: float16 statt bfloat16
                             bnb_4bit_use_double_quant=True,
                             bnb_4bit_quant_type="nf4"
                         )
@@ -252,7 +253,7 @@ class ModelManager:
                         logger.warning(f"Unbekannte Quantisierungs-Bits: {quantization_bits}, verwende 8-bit")
                         quantization_config = BitsAndBytesConfig(
                             load_in_8bit=True,
-                            bnb_8bit_compute_dtype=torch.bfloat16
+                            bnb_8bit_compute_dtype=torch.float16  # FIX: float16 statt bfloat16
                         )
                     
                     model_kwargs["quantization_config"] = quantization_config
@@ -278,8 +279,40 @@ class ModelManager:
                 **model_kwargs
             )
             
+            # #region agent log
+            import json as json_log; log_data = {"location": "model_manager.py:279", "message": "Model loaded - checking device state", "data": {"has_device_attr": hasattr(self.model, 'device'), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') else None, "self_device": str(self.device), "model_dtype": str(self.model.dtype) if hasattr(self.model, 'dtype') else None}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A"}; 
+            try:
+                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log.dumps(log_data) + '\n')
+            except: pass
+            # #endregion
+            
             if self.device == "cpu":
                 self.model = self.model.to(self.device)
+            elif self.device == "cuda" and hasattr(self.model, 'hf_device_map'):
+                # FIX: Validiere dass Modell wirklich auf GPU geladen wurde (nicht "meta" device)
+                logger.info("Validiere dass Modell auf echten GPU-Devices geladen wurde...")
+                meta_modules = []
+                for name, module in self.model.named_modules():
+                    try:
+                        first_param = next(module.parameters(), None)
+                        if first_param is not None and str(first_param.device) == "meta":
+                            meta_modules.append(name)
+                    except StopIteration:
+                        continue
+                
+                if meta_modules:
+                    error_msg = f"Modell wurde nicht korrekt geladen - folgende Module sind auf 'meta' device: {meta_modules[:5]}"
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+                
+                logger.info("✓ Alle Module erfolgreich auf GPU geladen (kein 'meta' device)")
+            
+            # #region agent log
+            import json as json_log2; log_data2 = {"location": "model_manager.py:309", "message": "After device assignment and validation", "data": {"cpu_branch_taken": self.device == "cpu", "model_device": str(self.model.device) if hasattr(self.model, 'device') else "no device attr", "first_param_device": str(next(self.model.parameters()).device) if self.model else "no model"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A,D"}; 
+            try:
+                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log2.dumps(log_data2) + '\n')
+            except: pass
+            # #endregion
             
             # Prüfe Performance-Settings für torch.compile()
             use_torch_compile = False
@@ -461,7 +494,9 @@ class ModelManager:
         words = response_stripped.split()
         if words:
             last_word = words[-1]
-            if len(last_word) < 3:  # Sehr kurzes letztes Wort = wahrscheinlich abgeschnitten
+            # FIX: Akzeptiere kurze Wörter wenn sie mit Punktation enden (z.B. "4.")
+            has_punctuation = last_word.endswith(('.', '!', '?', ':', ';'))
+            if len(last_word) < 3 and not has_punctuation:  # Sehr kurzes letztes Wort OHNE Punktation = wahrscheinlich abgeschnitten
                 incomplete_indicators.append(True)
         
         if any(incomplete_indicators):
@@ -560,15 +595,19 @@ class ModelManager:
         # OPTION C: Stoppe bei mehrfachen Nachrichten (User:/Assistant:/System:)
         # Nutzen: Wenn Modell mehrere Chat-Turns generiert
         # Risiko: Niedrig - stoppt nur bei klaren Markern
-        # AKTIVIEREN: Entferne die # vor den nächsten Zeilen
-        # lines = response.split('\n')
-        # cleaned_lines = []
-        # for line in lines:
-        #     if line.strip().startswith(('User:', 'Assistant:', 'System:')):
-        #         break
-        #     cleaned_lines.append(line)
-        # response = '\n'.join(cleaned_lines).strip()
-        # logger.debug(f"[Clean] Multiple messages stopped")
+        # AKTIVIERT: Trimmt Response bei "Human:", "Assistant:", "System:" Markern
+        import re
+        # Trimme bei Markern auch mid-line
+        markers = ['Human:', 'Assistant:', 'System:', 'User:']
+        for marker in markers:
+            if marker in response:
+                # Finde Position des Markers
+                pos = response.find(marker)
+                # Wenn der Marker nicht am Anfang ist (dann ist es kein Fehler, sondern Content)
+                if pos > 10:  # Mindestens 10 Zeichen Content vorher
+                    response = response[:pos].strip()
+                    logger.debug(f"[Clean] Trimmed at marker '{marker}'")
+                    break
         
         # OPTION D: Entferne Prompt-Reste (falls Prompt in Response enthalten)
         # Nutzen: Wenn Tokenizer Prompt nicht korrekt entfernt
@@ -606,6 +645,12 @@ class ModelManager:
         Returns:
             Die generierte Antwort
         """
+        # #region agent log
+        import json as json_log_gen; log_data_gen = {"location": "model_manager.py:616", "message": "Generate entry - model state", "data": {"model_loaded": self.model is not None, "current_model_id": self.current_model_id, "has_device": hasattr(self.model, 'device') if self.model else False, "has_hf_device_map": hasattr(self.model, 'hf_device_map') if self.model else False, "hf_device_map_len": len(self.model.hf_device_map) if (self.model and hasattr(self.model, 'hf_device_map') and self.model.hf_device_map) else 0}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "B,E"}; 
+        try:
+            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_gen.dumps(log_data_gen) + '\n')
+        except: pass
+        # #endregion
         try:
             ## Verwende Chat-Template wenn verfügbar (für Qwen, Phi-3, etc.)
             if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
@@ -636,18 +681,55 @@ class ModelManager:
             
             # Tokenize
             inputs = self.tokenizer(prompt, return_tensors="pt")
+            
+            # #region agent log
+            import json as json_log3; log_data3 = {"location": "model_manager.py:656", "message": "Before input device transfer", "data": {"has_device": hasattr(self.model, 'device'), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') and self.model.hf_device_map else None, "self_device": str(self.device), "input_device_before": str(inputs['input_ids'].device)}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "C,D"}; 
+            try:
+                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log3.dumps(log_data3) + '\n')
+            except: pass
+            # #endregion
+            
             # Stelle sicher, dass alle Inputs auf dem richtigen Device sind
             # WICHTIG: Wenn device_map="auto" verwendet wird, müssen Inputs auf dem ersten Device sein
             if hasattr(self.model, 'device'):
                 # Modell hat ein device-Attribut (wenn device_map nicht verwendet wird)
-                inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+                target_device = self.model.device
+                inputs = {k: v.to(target_device) for k, v in inputs.items()}
+                # #region agent log
+                import json as json_log4; log_data4 = {"location": "model_manager.py:672", "message": "Device branch: model.device", "data": {"target_device": str(target_device), "branch": "model.device"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
+                try:
+                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log4.dumps(log_data4) + '\n')
+                except: pass
+                # #endregion
             elif hasattr(self.model, 'hf_device_map') and self.model.hf_device_map:
                 # Modell verwendet device_map="auto" - Inputs auf erstes Device
                 first_device = list(self.model.hf_device_map.values())[0]
-                inputs = {k: v.to(first_device) for k, v in inputs.items()}
+                target_device = first_device
+                inputs = {k: v.to(target_device) for k, v in inputs.items()}
+                # #region agent log
+                import json as json_log5; log_data5 = {"location": "model_manager.py:683", "message": "Device branch: hf_device_map", "data": {"target_device": str(target_device), "branch": "hf_device_map", "device_map_values": [str(v) for v in self.model.hf_device_map.values()]}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
+                try:
+                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log5.dumps(log_data5) + '\n')
+                except: pass
+                # #endregion
             else:
                 # Fallback: Verwende self.device
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                target_device = self.device
+                inputs = {k: v.to(target_device) for k, v in inputs.items()}
+                # #region agent log
+                import json as json_log6; log_data6 = {"location": "model_manager.py:694", "message": "Device branch: fallback self.device", "data": {"target_device": str(target_device), "branch": "fallback"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
+                try:
+                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log6.dumps(log_data6) + '\n')
+                except: pass
+                # #endregion
+            
+            # #region agent log
+            import json as json_log7; log_data7 = {"location": "model_manager.py:703", "message": "After input device transfer", "data": {"input_device_after": str(inputs['input_ids'].device), "target_device": str(target_device)}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "C,D"}; 
+            try:
+                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log7.dumps(log_data7) + '\n')
+            except: pass
+            # #endregion
+            
             input_length = inputs['input_ids'].shape[1]
             
             # Modell-spezifische Limits
@@ -679,6 +761,10 @@ class ModelManager:
             logger.info(f"Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
             
             # Generate mit besseren Parametern
+            # Leere GPU Cache vor Generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             with torch.inference_mode():
                 # Bestimme Modell-Typ für spezifische Behandlung
                 is_mistral = "mistral" in self.current_model_id.lower() if self.current_model_id else False
@@ -704,6 +790,25 @@ class ModelManager:
                 
                 repetition_penalty = 1.3 if is_mistral else 1.2
                 
+                # FIX: eos_token_id muss single integer sein, nicht Liste
+                eos_token_id_single = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+                
+                logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id_single={eos_token_id_single}, max_new_tokens={max_new_tokens}, temperature={temperature}")
+                
+                # #region agent log
+                import json as json_log_gen2; 
+                try:
+                    first_param_device = str(next(self.model.parameters()).device) if self.model else "no model"
+                    model_on_meta = "meta" in first_param_device
+                except: 
+                    first_param_device = "error getting device"
+                    model_on_meta = False
+                log_data_gen2 = {"location": "model_manager.py:757", "message": "Right before model.generate()", "data": {"first_param_device": first_param_device, "model_on_meta": model_on_meta, "input_device": str(inputs['input_ids'].device), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') and self.model.hf_device_map else None}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A,B,D"}; 
+                try:
+                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_gen2.dumps(log_data_gen2) + '\n')
+                except: pass
+                # #endregion
+                
                 outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
@@ -713,10 +818,12 @@ class ModelManager:
                     top_k=50 if temperature > 0 and is_mistral else None,  # Top-k für Mistral
                     repetition_penalty=repetition_penalty,
                     pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                    eos_token_id=eos_token_id,
-                    no_repeat_ngram_size=3,
-                    early_stopping=True  # Stoppe früher wenn möglich
+                    eos_token_id=eos_token_id_single,
+                    no_repeat_ngram_size=3
+                    # early_stopping entfernt - invalid für sampling mode
                 )
+                
+                logger.warning(f"[DEBUG] AFTER model.generate() - outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}")
             
             # Decode - nur die neuen Tokens (ohne Input)
             input_length = inputs['input_ids'].shape[1]
@@ -758,7 +865,7 @@ class ModelManager:
                 
                 #logger.info(f"[Generate] Finale Response-Länge: {len(response)} chars, Modell: {self.current_model_id}")
             
-            #return response
+            return response
         
         except Exception as e:
             logger.error(f"Fehler bei der Generierung: {e}")
@@ -859,6 +966,9 @@ class ModelManager:
             
             repetition_penalty = 1.3 if is_mistral else 1.2
             
+            # FIX: eos_token_id muss single integer sein, nicht Liste
+            eos_token_id_single = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+            
             # Erstelle Streamer
             streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
             
@@ -872,9 +982,9 @@ class ModelManager:
                 "top_k": 50 if temperature > 0 and is_mistral else None,
                 "repetition_penalty": repetition_penalty,
                 "pad_token_id": self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                "eos_token_id": eos_token_id,
+                "eos_token_id": eos_token_id_single,
                 "no_repeat_ngram_size": 3,
-                "early_stopping": True,
+                # early_stopping entfernt - invalid für sampling mode
                 "streamer": streamer
             }
             

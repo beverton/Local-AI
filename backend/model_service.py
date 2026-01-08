@@ -884,6 +884,17 @@ async def get_image_model_status():
 @app.post("/chat")
 async def chat(request: ChatRequest, http_request: Request):
     """Chat-Request - delegiert an geladenes Text-Modell"""
+    # #region agent log
+    import json as json_log_svc; import time as time_svc; from datetime import datetime; 
+    start_time = time_svc.time()
+    request_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    user_message = request.message[:100] if request.message else (request.messages[-1]["content"][:100] if request.messages else "no message")
+    log_data_svc = {"location": "model_service.py:888", "message": f"🟢 ANFRAGE START um {request_time_str}", "data": {"user_message": user_message, "model_loaded": model_manager.is_model_loaded(), "loading_status": loading_status["text"]["loading"], "current_model": model_manager.get_current_model(), "timestamp_str": request_time_str}, "timestamp": start_time * 1000, "sessionId": "debug-session", "hypothesisId": "B,E"}; 
+    try:
+        with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_svc) + '\n')
+    except: pass
+    # #endregion
+    
     if not model_manager.is_model_loaded():
         raise HTTPException(status_code=400, detail="Kein Text-Modell geladen")
     
@@ -922,11 +933,30 @@ async def chat(request: ChatRequest, http_request: Request):
             # Füge System-Prompt am Anfang hinzu
             messages.insert(0, {"role": "system", "content": system_prompt})
         
-        response_text = model_manager.generate(
-            messages,
-            max_length=request.max_length,
-            temperature=request.temperature if request.temperature > 0 else 0.3
-        )
+        # FIX: Synchroner generate() Call muss in Thread-Pool laufen um Event Loop nicht zu blockieren
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            response_text = await loop.run_in_executor(
+                executor,
+                lambda: model_manager.generate(
+                    messages,
+                    max_length=request.max_length,
+                    temperature=request.temperature if request.temperature > 0 else 0.3
+                )
+            )
+        
+        # #region agent log
+        end_time = time_svc.time()
+        duration = end_time - start_time
+        end_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        log_data_end = {"location": "model_service.py:960", "message": f"🔵 ANTWORT FERTIG um {end_time_str}", "data": {"response_length": len(response_text), "duration_seconds": round(duration, 2), "start_time": request_time_str, "end_time": end_time_str, "success": True}, "timestamp": end_time * 1000, "sessionId": "debug-session", "hypothesisId": "timing"}; 
+        try:
+            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_end) + '\n')
+        except: pass
+        # #endregion
         
         return {
             "response": response_text,
@@ -934,6 +964,15 @@ async def chat(request: ChatRequest, http_request: Request):
             "conversation_id": request.conversation_id
         }
     except Exception as e:
+        # #region agent log
+        try:
+            error_time = time_svc.time()
+            duration = error_time - start_time
+            error_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            log_data_err = {"location": "model_service.py:976", "message": f"🔴 FEHLER um {error_time_str}", "data": {"error": str(e), "duration_seconds": round(duration, 2), "start_time": request_time_str, "error_time": error_time_str}, "timestamp": error_time * 1000, "sessionId": "debug-session", "hypothesisId": "timing"}; 
+            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_err) + '\n')
+        except: pass
+        # #endregion
         logger.error(f"Fehler bei Chat-Request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
