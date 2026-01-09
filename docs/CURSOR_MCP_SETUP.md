@@ -95,12 +95,20 @@ Nach der Konfiguration starten Sie Cursor neu, damit die MCP-Server-Konfiguratio
 
 Der MCP-Server stellt folgende Tools zur Verfügung:
 
+**Datei-Operationen:**
 - **web_search**: Führt Websuchen durch
 - **read_file**: Liest Dateien
 - **write_file**: Schreibt Dateien
 - **list_directory**: Listet Verzeichnisse auf
 - **delete_file**: Löscht Dateien
 - **file_exists**: Prüft Datei-Existenz
+
+**Model Service Integration:**
+- **list_models**: Listet alle verfügbaren Modelle (text, image, audio)
+- **load_model**: Lädt ein Modell im Model Service
+- **unload_model**: Entlädt ein Modell im Model Service
+- **model_status**: Gibt Status des aktuell geladenen Modells zurück
+- **chat**: Chat mit lokalem Modell über Model Service
 
 ### Chat mit lokalem Modell
 
@@ -172,6 +180,9 @@ Bei Problemen:
 2. Prüfen Sie die Model Service-Logs
 3. Testen Sie den MCP-Server manuell
 4. Stellen Sie sicher, dass alle Dependencies installiert sind
+
+
+
 
 
 

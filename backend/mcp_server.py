@@ -122,6 +122,93 @@ class MCPServer:
                     },
                     "required": ["file_path"]
                 }
+            },
+            "list_models": {
+                "name": "list_models",
+                "description": "Listet alle verfügbaren Modelle auf",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model_type": {
+                            "type": "string",
+                            "description": "Modell-Typ: 'text', 'image', 'audio' oder None für alle",
+                            "enum": ["text", "image", "audio"]
+                        }
+                    }
+                }
+            },
+            "load_model": {
+                "name": "load_model",
+                "description": "Lädt ein Modell im Model Service",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model_id": {
+                            "type": "string",
+                            "description": "Die ID des Modells (z.B. 'qwen-2.5-7b-instruct')"
+                        },
+                        "model_type": {
+                            "type": "string",
+                            "description": "Modell-Typ: 'text', 'image', 'audio'",
+                            "enum": ["text", "image", "audio"]
+                        }
+                    },
+                    "required": ["model_id", "model_type"]
+                }
+            },
+            "unload_model": {
+                "name": "unload_model",
+                "description": "Entlädt ein Modell im Model Service",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model_type": {
+                            "type": "string",
+                            "description": "Modell-Typ: 'text', 'image', 'audio'",
+                            "enum": ["text", "image", "audio"]
+                        }
+                    },
+                    "required": ["model_type"]
+                }
+            },
+            "model_status": {
+                "name": "model_status",
+                "description": "Gibt den Status des aktuell geladenen Modells zurück",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "model_type": {
+                            "type": "string",
+                            "description": "Modell-Typ: 'text', 'image', 'audio'",
+                            "enum": ["text", "image", "audio"]
+                        }
+                    },
+                    "required": ["model_type"]
+                }
+            },
+            "chat": {
+                "name": "chat",
+                "description": "Chat mit lokalem Modell über Model Service",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Die Nachricht"
+                        },
+                        "max_length": {
+                            "type": "integer",
+                            "description": "Maximale Antwort-Länge",
+                            "default": 2048
+                        },
+                        "temperature": {
+                            "type": "number",
+                            "description": "Temperature für Generierung (0.0-1.0)",
+                            "default": 0.3
+                        }
+                    },
+                    "required": ["message"]
+                }
             }
         }
     
@@ -225,7 +312,87 @@ class MCPServer:
             elif name == "file_exists":
                 file_path = arguments.get("file_path")
                 exists = file_exists(file_path)
-                return {"content": [{"type": "text", "text": json.dumps({"exists": exists}, ensure_ascii=False)}]} 
+                return {"content": [{"type": "text", "text": json.dumps({"exists": exists}, ensure_ascii=False)}]}
+            
+            elif name == "list_models":
+                if not self.model_service.is_available():
+                    raise RuntimeError("Model Service nicht verfügbar")
+                model_type = arguments.get("model_type")
+                if model_type == "text":
+                    models = self.model_service.list_text_models()
+                elif model_type == "image":
+                    models = self.model_service.list_image_models()
+                elif model_type == "audio":
+                    models = self.model_service.list_audio_models()
+                else:
+                    # Alle Modelle
+                    all_models = {
+                        "text": self.model_service.list_text_models() if self.model_service.is_available() else [],
+                        "image": self.model_service.list_image_models() if self.model_service.is_available() else [],
+                        "audio": self.model_service.list_audio_models() if self.model_service.is_available() else []
+                    }
+                    return {"content": [{"type": "text", "text": json.dumps(all_models, ensure_ascii=False, indent=2)}]}
+                return {"content": [{"type": "text", "text": json.dumps(models, ensure_ascii=False, indent=2)}]}
+            
+            elif name == "load_model":
+                if not self.model_service.is_available():
+                    raise RuntimeError("Model Service nicht verfügbar")
+                model_id = arguments.get("model_id")
+                model_type = arguments.get("model_type")
+                if model_type == "text":
+                    success = self.model_service.load_text_model(model_id)
+                elif model_type == "image":
+                    success = self.model_service.load_image_model(model_id)
+                elif model_type == "audio":
+                    success = self.model_service.load_audio_model(model_id)
+                else:
+                    raise ValueError(f"Unbekannter Modell-Typ: {model_type}")
+                return {"content": [{"type": "text", "text": json.dumps({"success": success, "model_id": model_id, "model_type": model_type}, ensure_ascii=False)}]}
+            
+            elif name == "unload_model":
+                if not self.model_service.is_available():
+                    raise RuntimeError("Model Service nicht verfügbar")
+                model_type = arguments.get("model_type")
+                if model_type == "text":
+                    success = self.model_service.unload_text_model()
+                elif model_type == "image":
+                    success = self.model_service.unload_image_model()
+                elif model_type == "audio":
+                    success = self.model_service.unload_audio_model()
+                else:
+                    raise ValueError(f"Unbekannter Modell-Typ: {model_type}")
+                return {"content": [{"type": "text", "text": json.dumps({"success": success, "model_type": model_type}, ensure_ascii=False)}]}
+            
+            elif name == "model_status":
+                if not self.model_service.is_available():
+                    raise RuntimeError("Model Service nicht verfügbar")
+                model_type = arguments.get("model_type")
+                if model_type == "text":
+                    status = self.model_service.get_text_model_status()
+                elif model_type == "image":
+                    status = self.model_service.get_image_model_status()
+                elif model_type == "audio":
+                    status = self.model_service.get_audio_model_status()
+                else:
+                    raise ValueError(f"Unbekannter Modell-Typ: {model_type}")
+                return {"content": [{"type": "text", "text": json.dumps(status, ensure_ascii=False, indent=2)}]}
+            
+            elif name == "chat":
+                if not self.model_service.is_available():
+                    raise RuntimeError("Model Service nicht verfügbar")
+                message = arguments.get("message")
+                max_length = arguments.get("max_length", 2048)
+                temperature = arguments.get("temperature", 0.3)
+                result = self.model_service.chat(
+                    message=message,
+                    messages=[{"role": "user", "content": message}],
+                    max_length=max_length,
+                    temperature=temperature
+                )
+                if not result:
+                    raise RuntimeError("Model Service hat keine Antwort zurückgegeben")
+                response_text = result.get("response", "")
+                return {"content": [{"type": "text", "text": response_text}]}
             
             else:
                 raise ValueError(f"Tool '{name}' nicht implementiert")

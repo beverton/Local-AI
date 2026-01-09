@@ -285,4 +285,50 @@ class ModelServiceClient:
         except Exception as e:
             #logger.error(f"Fehler bei Bildgenerierungs-Request: {e}")
             return None
+    
+    def list_text_models(self) -> List[Dict[str, Any]]:
+        """Listet alle verfügbaren Text-Modelle"""
+        try:
+            # Lade Config direkt (Model Service hat Zugriff auf config.json)
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    models = config.get("models", {})
+                    text_models = {k: v for k, v in models.items() if v.get("type") in ["qwen2", "phi3", "mistral", "text"]}
+                    return [{"id": k, **v} for k, v in text_models.items()]
+            return []
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Text-Modelle: {e}")
+            return []
+    
+    def list_image_models(self) -> List[Dict[str, Any]]:
+        """Listet alle verfügbaren Image-Modelle"""
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    models = config.get("models", {})
+                    image_models = {k: v for k, v in models.items() if v.get("type") == "image"}
+                    return [{"id": k, **v} for k, v in image_models.items()]
+            return []
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Image-Modelle: {e}")
+            return []
+    
+    def list_audio_models(self) -> List[Dict[str, Any]]:
+        """Listet alle verfügbaren Audio-Modelle"""
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    models = config.get("models", {})
+                    audio_models = {k: v for k, v in models.items() if v.get("type") == "audio"}
+                    return [{"id": k, **v} for k, v in audio_models.items()]
+            return []
+        except Exception as e:
+            logger.error(f"Fehler beim Abrufen der Audio-Modelle: {e}")
+            return []
 

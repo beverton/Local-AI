@@ -3,10 +3,10 @@
     "local-ai": {
       "command": "python",
       "args": [
-        "ABSOLUTER_PFAD_ZUM_PROJEKT\\backend\\mcp_server.py"
+        "G:\\04-CODING\\Local Ai\\backend\\mcp_server.py"
       ],
       "env": {
-        "PYTHONPATH": "ABSOLUTER_PFAD_ZUM_PROJEKT\\backend"
+        "PYTHONPATH": "G:\\04-CODING\\Local Ai\\backend"
       }
     }
   }

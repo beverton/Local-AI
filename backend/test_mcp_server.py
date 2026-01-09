@@ -77,6 +77,38 @@ def test_model_service_connection():
         print(f"✗ Model Service Test fehlgeschlagen: {e}")
         return False
 
+def test_model_tools():
+    """Test Model Service Tools"""
+    print("\nTesting Model Service Tools...")
+    server = MCPServer()
+    server.initialized = True
+    
+    if not server.model_service.is_available():
+        print("⚠ Model Service nicht verfügbar - überspringe Tool-Tests")
+        return True  # Nicht als Fehler werten
+    
+    try:
+        # Test list_models
+        result = server.handle_tools_call("list_models", {"model_type": "text"})
+        print("✓ list_models funktioniert")
+        
+        # Test model_status
+        result = server.handle_tools_call("model_status", {"model_type": "text"})
+        print("✓ model_status funktioniert")
+        
+        # Test chat (nur wenn Modell geladen ist)
+        status = server.model_service.get_text_model_status()
+        if status and status.get("loaded"):
+            result = server.handle_tools_call("chat", {"message": "Hallo", "max_length": 100, "temperature": 0.3})
+            print("✓ chat funktioniert")
+        else:
+            print("⚠ Modell nicht geladen - überspringe chat-Test")
+        
+        return True
+    except Exception as e:
+        print(f"✗ Model Tools Test fehlgeschlagen: {e}")
+        return False
+
 
 if __name__ == "__main__":
     print("=" * 50)
@@ -87,6 +119,7 @@ if __name__ == "__main__":
     results.append(test_initialize())
     results.append(test_tools_list())
     results.append(test_model_service_connection())
+    results.append(test_model_tools())
     
     print("\n" + "=" * 50)
     print(f"Tests: {sum(results)}/{len(results)} erfolgreich")
@@ -98,6 +131,7 @@ if __name__ == "__main__":
     else:
         print("\n⚠ Einige Tests fehlgeschlagen")
         sys.exit(1)
+
 
 
 
