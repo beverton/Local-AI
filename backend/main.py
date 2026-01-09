@@ -336,7 +336,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     max_length: int = 2048
-    temperature: float = 0.7
+    temperature: float = 0.3  # Default: 0.3 für bessere Qualität (konsistent mit Frontend)
     language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en") - wenn None, wird aus speech_input_app/config.json gelesen
 
 
@@ -1044,6 +1044,34 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     }
                 )
         
+        # ==========================================
+        # PHASE 1: RAG (wenn auto_web_search aktiv) - auch für ChatAgent
+        # ==========================================
+        sources = []
+        sources_context = ""
+        enhanced_message = request.message
+        
+        if quality_manager.settings.get("auto_web_search", False):
+            # Prüfe ob Frage Web-Search benötigt (Fakten, aktuelle Infos, etc.)
+            if quality_manager._needs_web_search(request.message):
+                try:
+                    # Web-Search durchführen (SYNCHRON - vor Generierung!)
+                    # WICHTIG: Expliziter Timeout von 5 Sekunden um Blockierung zu vermeiden
+                    search_results = quality_manager.web_search(request.message, max_results=5, timeout=5.0)
+                    
+                    if search_results and "results" in search_results:
+                        sources = search_results["results"]
+                        
+                        # Formatiere Quellen als Kontext für LLM
+                        sources_context = quality_manager.format_sources_for_context(sources)
+                        
+                        # Füge Kontext zur User-Nachricht hinzu (ChatAgent nutzt diese)
+                        enhanced_message = f"{request.message}\n\nRelevante Informationen aus verifizierten Webquellen:\n{sources_context}\n\nNutze diese Informationen in deiner Antwort und referenziere die Quellen mit [1], [2], [3], etc."
+                        
+                        logger.info(f"RAG aktiviert (ChatAgent): {len(sources)} Quellen als Kontext hinzugefügt")
+                except Exception as e:
+                    logger.warning(f"RAG Web-Search fehlgeschlagen: {e}, fahre ohne Kontext fort")
+        
         # Erstelle oder hole ChatAgent für diese Conversation
         conversation_agents = agent_manager.get_conversation_agents(conversation_id)
         chat_agent = None
@@ -1064,8 +1092,93 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
             chat_agent = agent_manager.get_agent(conversation_id, agent_id)
         
-        # Nutze ChatAgent für Antwort-Generierung
-        response = chat_agent.process_message(request.message)
+        # Nutze ChatAgent für Antwort-Generierung (mit RAG-Kontext wenn vorhanden)
+        response = chat_agent.process_message(enhanced_message)
+        
+        # ==========================================
+        # PHASE 2: Post-Processing (Validation + Retry) - auch für ChatAgent
+        # ==========================================
+        max_retries = 2 if quality_manager.settings.get("web_validation", False) else 0
+        best_response = response
+        best_score = 1.0
+        
+        for attempt in range(max_retries + 1):
+            # POST-PROCESSING: Sammle alle Check-Ergebnisse
+            all_issues = []
+            
+            # CHECK 1: Hallucination-Check (unabhängig von web_validation!)
+            if quality_manager.settings.get("hallucination_check", False):
+                hallucination_issues = quality_manager._check_hallucinations(response)
+                all_issues.extend(hallucination_issues)
+                if hallucination_issues:
+                    logger.info(f"Hallucination-Check (Versuch {attempt + 1}): {len(hallucination_issues)} Issues gefunden")
+            
+            # CHECK 2: Web-Validation (Vollständigkeit, Struktur, etc.)
+            if quality_manager.settings.get("web_validation", False):
+                validation = quality_manager.validate_response(
+                    response=response,
+                    question=request.message,
+                    auto_search=False  # Kein Web-Search (hatten wir schon in RAG)
+                )
+                
+                # Füge Validation-Issues hinzu
+                all_issues.extend(validation.get("issues", []))
+                
+                score = validation.get("confidence", 1.0)
+                if score > best_score:
+                    best_response = response
+                    best_score = score
+            else:
+                validation = {
+                    "valid": True,
+                    "confidence": 1.0,
+                    "issues": [],
+                    "sources": sources,
+                    "suggestions": []
+                }
+            
+            # ENTSCHEIDUNG: Valid oder Retry?
+            is_valid = len(all_issues) == 0
+            
+            if is_valid:
+                logger.info(f"Response valide (Versuch {attempt + 1})")
+                break  # Erfolgreich!
+            else:
+                logger.warning(f"Response hat Issues (Versuch {attempt + 1}): {all_issues}")
+                
+                # Retry nur wenn web_validation aktiv UND Retries übrig
+                if quality_manager.settings.get("web_validation", False) and attempt < max_retries:
+                    # Retry mit Feedback - füge Feedback zur Nachricht hinzu
+                    feedback = quality_manager.generate_retry_prompt(
+                        request.message, response, all_issues
+                    )
+                    enhanced_message_with_feedback = f"{enhanced_message}\n\n{feedback}"
+                    
+                    logger.info(f"Retry {attempt + 2}/{max_retries + 1} mit Feedback...")
+                    response = chat_agent.process_message(enhanced_message_with_feedback)
+                    continue  # Prüfe erneut
+                else:
+                    # Kein Retry möglich - nutze beste verfügbare Antwort
+                    if best_response != response and quality_manager.settings.get("web_validation", False):
+                        response = best_response
+                        logger.info("Nutze beste verfügbare Antwort nach max Retries")
+                    break
+        
+        # Quellen-Header für Response
+        sources_header = ""
+        if sources:
+            source_links = []
+            for i, source in enumerate(sources[:5], 1):
+                url = source.get("url", "")
+                title = source.get("title", f"Quelle {i}")
+                if url:
+                    source_links.append(f'<a href="{url}" target="_blank" rel="noopener noreferrer">[{i}] {title}</a>')
+            
+            if source_links:
+                sources_header = f"<div style='margin-bottom: 1em; font-size: 0.9em; color: #666;'><strong>Quellen:</strong> {' | '.join(source_links)}</div>\n\n"
+        
+        if sources_header:
+            response = sources_header + response
         
         # Speichere Nachrichten
         conversation_manager.add_message(conversation_id, "user", request.message)
@@ -1116,7 +1229,10 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     # da bei USE_MODEL_SERVICE das Modell im Model-Service läuft, nicht lokal
     current_model = model_to_use  # Verwende bereits bestimmtes Modell
     
-    # Generiere System-Prompt basierend auf Sprache
+    # Prüfe ob Frage Coding-bezogen ist
+    is_coding = quality_manager.is_coding_question(request.message)
+    
+    # Generiere System-Prompt basierend auf Sprache und Modell
     if current_model and "phi-3" in current_model.lower():
         # Phi-3 verwendet ChatML-Format, kein separater System-Prompt nötig
         system_prompt = None
@@ -1127,6 +1243,25 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         else:  # Deutsch (de) oder andere
             system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
         system_prompt = preference_learner.get_system_prompt(system_prompt)
+    elif current_model and "qwen" in current_model.lower() and is_coding:
+        # Qwen: Coding-spezifischer Prompt
+        if response_language == "en":
+            system_prompt = """You are an expert coding assistant. When providing code:
+1. Use Markdown code blocks with language tags (```python, ```javascript, etc.)
+2. Include helpful comments explaining key parts
+3. Follow best practices and coding standards
+4. Handle errors appropriately (try/except, error handling)
+5. Write clean, readable, and maintainable code
+6. Explain briefly what the code does if needed"""
+        else:  # Deutsch (de) oder andere
+            system_prompt = """Du bist ein Experte für Programmierung. Wenn du Code bereitstellst:
+1. Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
+2. Füge hilfreiche Kommentare hinzu, die wichtige Teile erklären
+3. Befolge Best Practices und Coding-Standards
+4. Behandle Fehler angemessen (try/except, Fehlerbehandlung)
+5. Schreibe sauberen, lesbaren und wartbaren Code
+6. Erkläre kurz was der Code macht, falls nötig"""
+        system_prompt = preference_learner.get_system_prompt(system_prompt)
     else:
         # Andere Modelle: Sprachspezifischer Prompt
         if response_language == "en":
@@ -1134,6 +1269,38 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         else:  # Deutsch (de) oder andere
             system_prompt = "Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten. Generiere KEINE weiteren User- oder Assistant-Nachrichten."
         system_prompt = preference_learner.get_system_prompt(system_prompt)
+    # ==========================================
+    # PHASE 1: RAG (wenn auto_web_search aktiv)
+    # ==========================================
+    sources = []
+    sources_context = ""
+    
+    if quality_manager.settings.get("auto_web_search", False):
+        # Prüfe ob Frage Web-Search benötigt (Fakten, aktuelle Infos, etc.)
+        if quality_manager._needs_web_search(request.message):
+            try:
+                # Web-Search durchführen (SYNCHRON - vor Generierung!)
+                # WICHTIG: Expliziter Timeout von 5 Sekunden um Blockierung zu vermeiden
+                search_results = quality_manager.web_search(request.message, max_results=5, timeout=5.0)
+                
+                if search_results and "results" in search_results:
+                    sources = search_results["results"]
+                    
+                    # Formatiere Quellen als Kontext für LLM
+                    sources_context = quality_manager.format_sources_for_context(sources)
+                    
+                    # Füge Kontext zum System-Prompt hinzu
+                    if system_prompt:
+                        system_prompt += f"\n\nRelevante Informationen aus verifizierten Webquellen:\n{sources_context}\n\nNutze diese Informationen in deiner Antwort und referenziere die Quellen mit [1], [2], [3], etc."
+                    else:
+                        # Falls kein System-Prompt, erstelle einen
+                        system_prompt = f"Relevante Informationen aus verifizierten Webquellen:\n{sources_context}\n\nNutze diese Informationen in deiner Antwort und referenziere die Quellen mit [1], [2], [3], etc."
+                    
+                    logger.info(f"RAG aktiviert: {len(sources)} Quellen als Kontext hinzugefügt")
+            except Exception as e:
+                logger.warning(f"RAG Web-Search fehlgeschlagen: {e}, fahre ohne Kontext fort")
+                sources = []  # Sicherstellen dass sources leer ist bei Fehler
+    
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     
@@ -1199,8 +1366,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     
     ## Generiere Antwort
     try:
-        # Verwende niedrigere Temperature standardmäßig für bessere Qualität
-        effective_temperature = request.temperature if request.temperature > 0 else 0.3
+        # Coding-Optimierungen für Qwen: niedrigere Temperature, höhere max_length
+        if current_model and "qwen" in current_model.lower() and is_coding:
+            effective_temperature = request.temperature if request.temperature > 0 else 0.2  # Niedriger für präziseren Code
+            effective_max_length = max(request.max_length, 4096)  # Höher für längeren Code
+        else:
+            effective_temperature = request.temperature if request.temperature > 0 else 0.3
+            effective_max_length = request.max_length
         
         if USE_MODEL_SERVICE:
             # Nutze Model-Service
@@ -1212,7 +1384,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                         message=request.message,
                         messages=messages,  # Sende vollständige Messages-Liste
                         conversation_id=conversation_id,
-                        max_length=request.max_length,
+                        max_length=effective_max_length,
                         temperature=effective_temperature,
                         language=response_language  # Sende Sprache mit
                     )
@@ -1227,8 +1399,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
             if result:
                 response = result.get("response", "")
-                #else:
-                #raise HTTPException(status_code=500, detail="Fehler bei Chat-Request an Model-Service")
+                logger.info(f"Model-Service Response erhalten: Länge={len(response)} Zeichen")
+                if not response:
+                    logger.warning("Model-Service hat leere Response zurückgegeben!")
+                    raise HTTPException(status_code=500, detail="Model-Service hat leere Response zurückgegeben")
+            else:
+                logger.error("Model-Service hat kein Ergebnis zurückgegeben!")
+                raise HTTPException(status_code=500, detail="Model-Service hat kein Ergebnis zurückgegeben")
         else:
             # Fallback: Nutze lokale Manager
             # WICHTIG: Generierung in Thread Pool ausführen (blockiert Event Loop nicht)
@@ -1237,7 +1414,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 try:
                     return model_manager.generate(
                         messages,
-                        max_length=request.max_length,
+                        max_length=effective_max_length,
                         temperature=effective_temperature
                     )
                 except Exception as e:
@@ -1251,80 +1428,128 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             )
         
         # Logge Response
-        logger.info(f"Response: {response[:200]}...")
+        if response:
+            logger.info(f"Response erhalten: Länge={len(response)} Zeichen, Vorschau: {response[:200]}...")
+        else:
+            logger.error("Response ist leer oder None!")
+            raise HTTPException(status_code=500, detail="Response ist leer")
         
         # HINWEIS: Response-Bereinigung erfolgt bereits in model_manager.generate()
         # Keine doppelte Bereinigung hier - das würde gültige Antworten beschädigen
         # Die Response ist bereits vollständig bereinigt und bereit für Quality Management
         
-        # Quality Management (nutzt automatisch Web-Search wenn nötig) - für ALLE Chat-Modelle
-        # Funktioniert mit Qwen, Phi-3, Mistral, etc. - modellunabhängig
-        # WICHTIG: Web-Search läuft asynchron im Thread Pool - blockiert Server NICHT
-        validation = {
-            "valid": True,
-            "confidence": 1.0,
-            "issues": [],
-            "sources": [],
-            "suggestions": []
-        }
+        # ==========================================
+        # PHASE 2: Post-Processing (Validation + Retry)
+        # ==========================================
+        max_retries = 2 if quality_manager.settings.get("web_validation", False) else 0
+        best_response = response
+        best_score = 1.0
+        original_messages = messages.copy()  # Backup für Retries
         
-        # Prüfe ob Quality Management aktiviert ist
-        quality_settings = quality_manager.get_settings()
-        sources = []
-        
-        # WICHTIG: Web-Search ist standardmäßig DEAKTIVIERT um Server-Blockierung zu vermeiden
-        # Wenn aktiviert, läuft es komplett im Hintergrund (blockiert Response NICHT)
-        # Quellen werden nicht in die Response eingefügt, da Web-Search asynchron läuft
-        if quality_settings.get("auto_web_search", False):  # Default: False (nicht blockierend)
-            # Prüfe ob Frage Web-Search benötigt
-            needs_search = quality_manager._needs_web_search(request.message)
-            if needs_search:
-                # Web-Search komplett im Hintergrund (blockiert Response NICHT)
-                # Response wird sofort zurückgegeben, Web-Search läuft weiter
-                def do_web_search_background():
-                    try:
-                        search_results = quality_manager.web_search(request.message, max_results=5)
-                        if search_results and "results" in search_results:
-                            logger.info(f"Web-Search im Hintergrund: {len(search_results['results'])} Quellen")
-                    except Exception as e:
-                        logger.warning(f"Web-Search im Hintergrund fehlgeschlagen: {e}")
-                
-                # Starte im Hintergrund (blockiert nicht)
-                background_tasks.add_task(do_web_search_background)
-                logger.debug("Web-Search im Hintergrund gestartet (Response wird sofort zurückgegeben)")
-        
-        # Basis-Validierung (ohne Web-Search - schnell, nicht blockierend)
-        # WICHTIG: Validierung läuft nur wenn aktiviert, sonst wird sie übersprungen
-        if quality_settings.get("web_validation", True):
-            try:
-                # Validierung mit auto_search=False (kein Web-Search, nicht blockierend)
-                temp_validation = quality_manager.validate_response(
+        for attempt in range(max_retries + 1):
+            # POST-PROCESSING: Sammle alle Check-Ergebnisse
+            all_issues = []
+            
+            # CHECK 1: Hallucination-Check (unabhängig von web_validation!)
+            if quality_manager.settings.get("hallucination_check", False):
+                hallucination_issues = quality_manager._check_hallucinations(response)
+                all_issues.extend(hallucination_issues)
+                if hallucination_issues:
+                    logger.info(f"Hallucination-Check (Versuch {attempt + 1}): {len(hallucination_issues)} Issues gefunden")
+            
+            # CHECK 2: Web-Validation (Vollständigkeit, Struktur, etc.)
+            if quality_manager.settings.get("web_validation", False):
+                validation = quality_manager.validate_response(
                     response=response,
                     question=request.message,
-                    auto_search=False  # Web-Search deaktiviert (wird im Hintergrund gemacht wenn aktiviert)
+                    auto_search=False  # Kein Web-Search (hatten wir schon in RAG)
                 )
-                # Füge Quellen hinzu (falls vorhanden)
-                temp_validation["sources"] = sources
-                validation = temp_validation
-            except Exception as qm_error:
-                logger.warning(f"Quality Management Validierung fehlgeschlagen (überspringe): {qm_error}")
-                # Fallback: Validation ohne Web-Search
+                
+                # Füge Validation-Issues hinzu
+                all_issues.extend(validation.get("issues", []))
+                
+                score = validation.get("confidence", 1.0)
+                if score > best_score:
+                    best_response = response
+                    best_score = score
+            else:
+                # Kein Validation - setze default
                 validation = {
                     "valid": True,
-                    "confidence": 0.8,
+                    "confidence": 1.0,
                     "issues": [],
-                    "sources": sources,  # Quellen trotzdem hinzufügen falls vorhanden
+                    "sources": sources,
                     "suggestions": []
                 }
-        else:
-            # Quality Management deaktiviert - überspringe Validierung komplett
-            validation = {
-                "valid": True,
-                "confidence": 1.0,
-                "issues": [],
-                "sources": sources,
-                "suggestions": []
-            }
+            
+            # ENTSCHEIDUNG: Valid oder Retry?
+            is_valid = len(all_issues) == 0
+            
+            if is_valid:
+                logger.info(f"Response valide (Versuch {attempt + 1})")
+                break  # Erfolgreich!
+            else:
+                logger.warning(f"Response hat Issues (Versuch {attempt + 1}): {all_issues}")
+                
+                # Retry nur wenn web_validation aktiv UND Retries übrig
+                if quality_manager.settings.get("web_validation", False) and attempt < max_retries:
+                    # Retry mit Feedback
+                    feedback = quality_manager.generate_retry_prompt(
+                        request.message, response, all_issues
+                    )
+                    # Erstelle neue Messages-Liste mit Feedback
+                    messages = original_messages.copy()
+                    messages.append({"role": "system", "content": feedback})
+                    
+                    # Regeneriere Response
+                    logger.info(f"Retry {attempt + 2}/{max_retries + 1} mit Feedback...")
+                    
+                    if USE_MODEL_SERVICE:
+                        def chat_retry_in_thread():
+                            return model_service_client.chat(
+                                message=request.message,
+                                messages=messages,
+                                conversation_id=conversation_id,
+                                max_length=effective_max_length,
+                                temperature=effective_temperature,
+                                language=response_language
+                            )
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(
+                            model_generation_executor,
+                            chat_retry_in_thread
+                        )
+                        if result:
+                            response = result.get("response", "")
+                    else:
+                        def generate_retry_in_thread():
+                            return model_manager.generate(
+                                messages,
+                                max_length=effective_max_length,
+                                temperature=effective_temperature,
+                                is_coding=is_coding
+                            )
+                        loop = asyncio.get_event_loop()
+                        response = await loop.run_in_executor(
+                            model_generation_executor,
+                            generate_retry_in_thread
+                        )
+                    continue  # Prüfe erneut
+                else:
+                    # Kein Retry möglich - nutze beste verfügbare Antwort
+                    if best_response != response and quality_manager.settings.get("web_validation", False):
+                        response = best_response
+                        logger.info("Nutze beste verfügbare Antwort nach max Retries")
+                    break
+        
+        # Finale Validation für Response-Formatierung
+        validation = {
+            "valid": len(all_issues) == 0,
+            "confidence": best_score,
+            "issues": all_issues,
+            "sources": sources,
+            "suggestions": validation.get("suggestions", []) if quality_manager.settings.get("web_validation", False) else []
+        }
         
         # Quellen im Fließtext als klickbare Links im Header der Antwort
         sources_header = ""
@@ -1361,6 +1586,12 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             all_messages = conversation_manager.get_conversation_history(conversation_id)
             preference_learner.learn_from_conversation(all_messages)
         
+        # Finale Prüfung vor Return
+        if not response:
+            logger.error("Response ist leer vor Return!")
+            raise HTTPException(status_code=500, detail="Response ist leer")
+        
+        logger.info(f"Return ChatResponse: Länge={len(response)} Zeichen, conversation_id={conversation_id}")
         return ChatResponse(response=response, conversation_id=conversation_id)
         
     except HTTPException:

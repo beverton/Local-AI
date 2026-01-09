@@ -445,7 +445,7 @@ class ModelManager:
             self.tokenizer = None
             return False
     
-    def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, max_retries: int = 2) -> str:
+    def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, max_retries: int = 2, is_coding: bool = False) -> str:
         """
         Generiert eine Antwort basierend auf Messages (Chat-Format) mit Validierung und Retry-Mechanismus
         
@@ -726,7 +726,7 @@ class ModelManager:
         
         return response
     
-    def _generate_internal(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3) -> str:
+    def _generate_internal(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, is_coding: bool = False) -> str:
         """
         Interne Generierungsmethode (ohne Validierung/Retry)
         

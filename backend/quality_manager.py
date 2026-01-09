@@ -70,6 +70,26 @@ class QualityManager:
             self.save_settings()
             logger.info(f"Quality Setting '{key}' auf {value} gesetzt")
     
+    def is_coding_question(self, message: str) -> bool:
+        """
+        Erkennt ob eine Frage Coding-bezogen ist
+        
+        Args:
+            message: Die Frage/Nachricht
+            
+        Returns:
+            True wenn Coding-bezogen, False sonst
+        """
+        import re
+        coding_patterns = [
+            r"\b(schreibe|erstelle|implementiere|programmiere|code|funktion|klasse|def|class|function)\b",
+            r"\.(py|js|ts|java|cpp|c|go|rs|php|rb|swift|kt)\b",
+            r"\b(algorithmus|syntax|debug|fehler|exception|try|catch|import|from)\b",
+            r"\b(api|endpoint|request|response|json|xml|http)\b"
+        ]
+        message_lower = message.lower()
+        return any(re.search(pattern, message_lower, re.IGNORECASE) for pattern in coding_patterns)
+    
     def validate_response(self, response: str, question: str, auto_search: bool = True) -> Dict[str, Any]:
         """
         Validiert eine Antwort - nutzt automatisch Web-Search wenn auto_search=True
@@ -128,7 +148,8 @@ class QualityManager:
                 validation["valid"] = False
         
         # 2. Prüfe auf Halluzinationen (Fakten die nicht in Quellen stehen)
-        if self.settings.get("hallucination_check", True) and sources:
+        # Hinweis: _check_hallucinations() prüft selbst den Toggle und kann auch ohne sources laufen
+        if self.settings.get("hallucination_check", True):
             hallucinations = self._check_hallucinations(response, sources)
             if hallucinations:
                 validation["issues"].extend(hallucinations)
@@ -183,6 +204,50 @@ class QualityManager:
         
         return any(indicator in question_lower for indicator in search_indicators)
     
+    def format_sources_for_context(self, sources: List[Dict]) -> str:
+        """
+        Formatiert Web-Quellen als Kontext für LLM
+        
+        Args:
+            sources: Liste von Suchergebnissen
+            
+        Returns:
+            Formatierter Kontext-String
+        """
+        context_parts = []
+        
+        for idx, source in enumerate(sources[:5], 1):  # Max 5 Quellen
+            title = source.get("title", "")
+            snippet = source.get("snippet", "")
+            url = source.get("url", "")
+            
+            # Formatiere als nummerierte Quelle
+            context_parts.append(f"[{idx}] {title}\n{snippet}\nURL: {url}")
+        
+        return "\n\n".join(context_parts)
+    
+    def _is_factual_question(self, question: str) -> bool:
+        """
+        Prüft ob Frage faktische Informationen benötigt
+        
+        Erweitert von _needs_web_search() - prüft speziell auf Fakten
+        
+        Args:
+            question: Die Frage
+            
+        Returns:
+            True wenn Frage faktische Informationen benötigt
+        """
+        factual_keywords = [
+            "was ist", "wie viel", "wann", "wo", "wer",
+            "fakten", "daten", "statistik", "studie",
+            "aktuell", "heute", "2024", "2025",
+            "definition", "bedeutung", "erklärung"
+        ]
+        
+        question_lower = question.lower()
+        return any(keyword in question_lower for keyword in factual_keywords)
+    
     def _validate_against_web_sources(self, response: str, sources: List[Dict[str, Any]]) -> List[str]:
         """Zusätzliche Validierung gegen Web-Quellen"""
         issues = []
@@ -200,17 +265,99 @@ class QualityManager:
         
         return contradictions
     
-    def _check_hallucinations(self, response: str, sources: List[Dict[str, Any]]) -> List[str]:
-        """Prüft auf Halluzinationen (Fakten nicht in Quellen)"""
-        hallucinations = []
+    def _check_hallucinations(self, response: str, sources: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        """
+        Erkennt Halluzinationen in Response
         
-        # Vereinfachte Implementierung
-        # Echte Implementierung würde:
-        # - Response in Fakten zerlegen
-        # - Jeden Fakt gegen Quellen prüfen
-        # - Nicht gefundene Fakten als mögliche Halluzinationen markieren
+        Prüft:
+        - URLs (Existenz, Validität)
+        - Fakten-Patterns (unbelegte Behauptungen)
+        - Spezifische Zahlen/Daten ohne Quelle
         
-        return hallucinations
+        Args:
+            response: Die zu prüfende Antwort
+            sources: Optional - Quellen für erweiterte Validierung
+            
+        Returns:
+            Liste von erkannten Problemen
+        """
+        issues = []
+        
+        # Toggle-Check: Ist Feature aktiv?
+        if not self.settings.get("hallucination_check", False):
+            return issues  # Skip wenn Toggle aus
+        
+        import re
+        
+        # 1. URL-Validierung
+        urls = re.findall(r'https?://[^\s\)]+', response)
+        for url in urls:
+            # Bereinige URL (entferne trailing Punkt, etc.)
+            url_clean = url.rstrip('.,;:!?')
+            
+            # Prüfe ob URL erreichbar ist (mit Cache)
+            if not self._is_valid_url(url_clean):
+                issues.append(f"Ungültige oder nicht erreichbare URL: {url_clean}")
+        
+        # 2. Hallucinations-Patterns
+        hallucination_patterns = [
+            (r'laut.*?Studie.*?\d{4}', "Unbestätigte Studien-Referenz"),
+            (r'Wikipedia.*?sagt', "Direkte Wikipedia-Zitate ohne Link"),
+            (r'Experten.*?(bestätigen|sagen|empfehlen)', "Unbelegte Experten-Aussagen"),
+            (r'\d+%.*?der.*?(Menschen|Nutzer|Befragten)', "Unbelegte Statistiken"),
+            (r'Forschung.*?zeigt', "Unbelegte Forschungs-Claims"),
+        ]
+        
+        for pattern, issue_desc in hallucination_patterns:
+            if re.search(pattern, response, re.IGNORECASE):
+                issues.append(issue_desc)
+        
+        # 3. Spezifische Zahlen ohne Quelle-Referenz
+        # Wenn Response Zahlen enthält, aber keine [1], [2] Referenzen
+        has_numbers = bool(re.search(r'\d{1,3}[,.]?\d*\s*(Prozent|%|Jahre|Tage|Stunden)', response))
+        has_source_refs = bool(re.search(r'\[\d+\]', response))
+        
+        if has_numbers and not has_source_refs and len(urls) == 0:
+            issues.append("Zahlen/Statistiken ohne Quellen-Referenz")
+        
+        return issues
+    
+    def _is_valid_url(self, url: str) -> bool:
+        """
+        Prüft ob URL erreichbar ist (mit Cache)
+        
+        Args:
+            url: Die zu prüfende URL
+            
+        Returns:
+            True wenn URL valide/erreichbar
+        """
+        # Cache-Check
+        if url in self.source_cache:
+            return self.source_cache[url]
+        
+        try:
+            import requests
+            from urllib.parse import urlparse
+            
+            # Basis-Validierung: URL-Format
+            parsed = urlparse(url)
+            if not all([parsed.scheme, parsed.netloc]):
+                self.source_cache[url] = False
+                return False
+            
+            # HEAD-Request (schneller als GET)
+            response = requests.head(url, timeout=3, allow_redirects=True)
+            is_valid = response.status_code < 400
+            
+            # Cache Ergebnis
+            self.source_cache[url] = is_valid
+            return is_valid
+            
+        except Exception as e:
+            logger.debug(f"URL-Validierung fehlgeschlagen für {url}: {e}")
+            self.source_cache[url] = False
+            return False
     
     def _check_actuality(self, sources: List[Dict[str, Any]]) -> bool:
         """Prüft ob Quellen aktuell sind"""
@@ -280,4 +427,33 @@ class QualityManager:
             "feedbacks": feedbacks,
             "average_rating": sum(f["feedback"].get("rating", 0) for f in feedbacks) / len(feedbacks) if feedbacks else 0
         }
+    
+    def generate_retry_prompt(self, original_question: str, failed_response: str, issues: List[str]) -> str:
+        """
+        Generiert Feedback-Prompt für Retry nach fehlgeschlagener Validierung
+        
+        Args:
+            original_question: Die ursprüngliche Frage
+            failed_response: Die fehlerhafte Antwort
+            issues: Liste von erkannten Problemen
+            
+        Returns:
+            Feedback-Prompt für Regenerierung
+        """
+        issues_text = "\n- ".join(issues)
+        
+        return f"""FEEDBACK zur vorherigen Antwort:
+
+Erkannte Probleme:
+- {issues_text}
+
+Bitte antworte ERNEUT auf die Frage: "{original_question}"
+
+WICHTIG:
+- Vermeide die oben genannten Probleme
+- Keine erfundenen URLs oder Fakten
+- Sei präzise und faktisch korrekt
+- Wenn du etwas nicht sicher weißt, sage es explizit
+- Nutze die bereitgestellten Quellen [1], [2], etc.
+"""
 
