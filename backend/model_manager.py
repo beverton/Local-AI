@@ -465,7 +465,7 @@ class ModelManager:
         for attempt in range(max_retries + 1):
             try:
                 # Normale Generierung
-                response = self._generate_internal(messages, current_max_length, temperature)
+                response = self._generate_internal(messages, current_max_length, temperature, is_coding=is_coding)
                 
                 # Validierung
                 validation_result = self._validate_response(response, messages)
@@ -857,7 +857,7 @@ class ModelManager:
                 if is_qwen:
                     # Qwen: Verwende Liste mit beiden EOS-Tokens
                     eos_token_id_for_generate = eos_token_id  # Bleibt Liste
-                    logger.info(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id_for_generate}")
+                    logger.debug(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id_for_generate}")
                 else:
                     # Andere Modelle: Single Integer
                     eos_token_id_for_generate = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
@@ -878,8 +878,8 @@ class ModelManager:
                     # early_stopping entfernt - invalid für sampling mode
                 )
                 
-                logger.warning(f"[DEBUG] AFTER model.generate() - outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}")
-                logger.info(f"[DEBUG] Generierung abgeschlossen, starte Decoding...")
+                logger.debug(f"[DEBUG] AFTER model.generate() - outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}")
+                logger.debug(f"[DEBUG] Generierung abgeschlossen, starte Decoding...")
             
             # Decode - nur die neuen Tokens (ohne Input)
             input_length = inputs['input_ids'].shape[1]
@@ -915,14 +915,14 @@ class ModelManager:
                 
                 response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
-                logger.info(f"[DEBUG] Decoding abgeschlossen, Länge: {len(response)} Zeichen")
+                logger.debug(f"[DEBUG] Decoding abgeschlossen, Länge: {len(response)} Zeichen")
                 
                 # 🔧 NEUE MINIMALISTISCHE BEREINIGUNG
-                logger.info(f"[DEBUG] Vor Cleaning: {len(response)} Zeichen")
+                logger.debug(f"[DEBUG] Vor Cleaning: {len(response)} Zeichen")
                 response = self._clean_response_minimal(response, messages, original_prompt)
-                logger.info(f"[DEBUG] Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...")
+                logger.debug(f"[DEBUG] Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...")
             
-            logger.info(f"[DEBUG] Response fertig, finale Länge: {len(response)} Zeichen")
+            logger.debug(f"[DEBUG] Response fertig, finale Länge: {len(response)} Zeichen")
             return response
         
         except Exception as e:
