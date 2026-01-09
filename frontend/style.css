@@ -471,6 +471,112 @@ body {
     text-align: center;
 }
 
+/* Code-Blöcke mit Copy-Button */
+.code-block-container {
+    margin: 12px 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+}
+
+.code-block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    min-height: 32px;
+}
+
+.code-language {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+}
+
+.code-copy-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 11px;
+    transition: all 0.2s ease;
+    height: 24px;
+    line-height: 1;
+}
+
+.code-copy-btn:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.code-copy-btn.copied {
+    background: var(--success);
+    border-color: var(--success);
+    color: white;
+}
+
+.code-copy-btn svg {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+}
+
+.code-block {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    overflow-x: auto;
+    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+.code-block code {
+    display: block;
+    white-space: pre;
+    word-wrap: normal;
+    overflow-x: auto;
+    color: inherit;
+    background: transparent;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+}
+
+/* Syntax-Highlighting für verschiedene Sprachen (optional) */
+.code-block .language-python {
+    color: #e0e0e0;
+}
+
+.code-block .language-javascript,
+.code-block .language-js {
+    color: #e0e0e0;
+}
+
+.code-block .language-html {
+    color: #e0e0e0;
+}
+
+.code-block .language-css {
+    color: #e0e0e0;
+}
+
+.code-block .language-json {
+    color: #e0e0e0;
+}
+
 /* Fortschrittsanzeige für Modell-Laden */
 .model-loading-progress {
     margin-top: 10px;

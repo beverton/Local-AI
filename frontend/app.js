@@ -1578,6 +1578,9 @@ function addMessageToChat(role, content, isLoading = false, files = []) {
     chatMessages.appendChild(messageDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     
+    // Initialisiere Copy-Buttons für Code-Blöcke
+    initializeCodeCopyButtons(messageDiv);
+    
     return messageId;
 }
 
@@ -1808,19 +1811,97 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function initializeCodeCopyButtons(container) {
+    /**
+     * Initialisiert Copy-Buttons für alle Code-Blöcke in einem Container
+     */
+    const copyButtons = container.querySelectorAll('.code-copy-btn');
+    
+    copyButtons.forEach(button => {
+        // Entferne alte Event-Listener (falls vorhanden)
+        const newButton = button.cloneNode(true);
+        button.parentNode.replaceChild(newButton, button);
+        
+        // Füge neuen Event-Listener hinzu
+        newButton.addEventListener('click', async () => {
+            const codeId = newButton.getAttribute('data-code-id');
+            const codeElement = document.getElementById(codeId);
+            
+            if (!codeElement) return;
+            
+            const codeText = codeElement.textContent;
+            
+            try {
+                await navigator.clipboard.writeText(codeText);
+                
+                // Visuelles Feedback
+                const copyText = newButton.querySelector('.copy-text');
+                const originalText = copyText.textContent;
+                copyText.textContent = 'Kopiert!';
+                newButton.classList.add('copied');
+                
+                setTimeout(() => {
+                    copyText.textContent = originalText;
+                    newButton.classList.remove('copied');
+                }, 2000);
+            } catch (err) {
+                console.error('Fehler beim Kopieren:', err);
+                // Fallback: Alte Methode
+                const textArea = document.createElement('textarea');
+                textArea.value = codeText;
+                textArea.style.position = 'fixed';
+                textArea.style.opacity = '0';
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    const copyText = newButton.querySelector('.copy-text');
+                    copyText.textContent = 'Kopiert!';
+                    setTimeout(() => {
+                        copyText.textContent = 'Kopieren';
+                    }, 2000);
+                } catch (e) {
+                    console.error('Fallback-Kopieren fehlgeschlagen:', e);
+                }
+                document.body.removeChild(textArea);
+            }
+        });
+    });
+}
+
 function formatMessageContent(text) {
     /**
-     * Formatiert Nachrichtentext mit klickbaren Links und Markdown-Unterstützung
+     * Formatiert Nachrichtentext mit klickbaren Links, Markdown-Unterstützung und Code-Blöcken
      * - Escaped HTML für XSS-Schutz
      * - Macht URLs klickbar
      * - Unterstützt Markdown-Links [text](url)
+     * - Erkennt Code-Blöcke (```language ... ```) und macht sie kopierbar
      * - Erhält Zeilenumbrüche
      */
     
-    // Escape HTML zuerst (XSS-Schutz)
-    let escaped = escapeHtml(text);
+    // Code-Blöcke zuerst extrahieren (bevor HTML escaped wird)
+    const codeBlocks = [];
+    let codeBlockIndex = 0;
     
-    // Markdown-Links erkennen und umwandeln: [text](url)
+    // Pattern: ```language\ncode\n``` oder ```language code\n``` oder ```\ncode\n```
+    // Unterstützt auch Code-Blöcke ohne Newline nach der Sprache
+    const codeBlockPattern = /```(\w+)?\s*\n?([\s\S]*?)```/g;
+    let processedText = text.replace(codeBlockPattern, (match, language, code) => {
+        const blockId = `code-block-${codeBlockIndex++}`;
+        // Entferne führende/trailing Whitespace und Newlines
+        const cleanCode = code.trim();
+        codeBlocks.push({
+            id: blockId,
+            language: (language || 'text').trim(),
+            code: cleanCode
+        });
+        return `__CODE_BLOCK_${blockId}__`;
+    });
+    
+    // Escape HTML (XSS-Schutz) - aber Code-Blöcke sind bereits extrahiert
+    let escaped = escapeHtml(processedText);
+    
+    // Markdown-Links erkennen und umwandeln: [text](url) (VOR Code-Blöcken einfügen)
     // Pattern: [beliebiger Text](http://... oder https://...)
     escaped = escaped.replace(
         /\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g,
@@ -1834,8 +1915,32 @@ function formatMessageContent(text) {
         '<a href="$1" target="_blank" rel="noopener noreferrer" class="message-link">$1</a>'
     );
     
-    // Zeilenumbrüche in <br> umwandeln
+    // Zeilenumbrüche in <br> umwandeln (VOR Code-Blöcken einfügen, damit Text richtig formatiert wird)
     escaped = escaped.replace(/\n/g, '<br>');
+    
+    // Code-Blöcke wieder einfügen mit Copy-Button (NACH Zeilenumbrüche-Ersetzung)
+    codeBlocks.forEach(block => {
+        const codeId = `code-content-${block.id}`;
+        const copyButtonId = `copy-btn-${block.id}`;
+        // Code mit Zeilenumbrüchen beibehalten (für <pre>)
+        const codeWithBreaks = escapeHtml(block.code).replace(/\n/g, '\n');
+        const codeHtml = `
+            <div class="code-block-container">
+                <div class="code-block-header">
+                    <span class="code-language">${escapeHtml(block.language)}</span>
+                    <button class="code-copy-btn" id="${copyButtonId}" data-code-id="${codeId}" title="Code kopieren">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                        <span class="copy-text">Kopieren</span>
+                    </button>
+                </div>
+                <pre class="code-block"><code id="${codeId}" class="language-${escapeHtml(block.language)}">${codeWithBreaks}</code></pre>
+            </div>
+        `;
+        escaped = escaped.replace(`__CODE_BLOCK_${block.id}__`, codeHtml);
+    });
     
     return escaped;
 }
@@ -2510,8 +2615,11 @@ async function sendMessageStream(message, conversationId, loadingId) {
                             const contentUpdateStartTime = Date.now();
                             
                             // Content sofort aktualisieren (kritisch für Streaming-Erlebnis)
+                            // Verwende innerHTML für Formatierung (Code-Blöcke, Links, etc.)
                             if (contentElement) {
-                                contentElement.textContent = fullResponse; // Sofort, nicht gebatchet
+                                contentElement.innerHTML = formatMessageContent(fullResponse);
+                                // Initialisiere Copy-Buttons nach jedem Update
+                                initializeCodeCopyButtons(messageDiv);
                             }
                             
                             const contentUpdateDuration = Date.now() - contentUpdateStartTime;
@@ -2566,6 +2674,12 @@ async function sendMessageStream(message, conversationId, loadingId) {
                             // Verstecke Fortschrittsanzeige
                             if (progressContainer) {
                                 progressContainer.style.display = 'none';
+                            }
+                            
+                            // Finale Formatierung mit Code-Blöcken
+                            if (contentElement) {
+                                contentElement.innerHTML = formatMessageContent(fullResponse);
+                                initializeCodeCopyButtons(messageDiv);
                             }
                             
                             // Antwort wird bereits vom Server gespeichert

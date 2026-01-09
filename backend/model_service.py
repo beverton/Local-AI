@@ -43,55 +43,6 @@ except Exception as e:
     ImageManager = None
 
 # Lifespan-Handler wird später definiert (nach allen benötigten Definitionen)
-# App wird hier initialisiert, lifespan wird später gesetzt
-def _create_lifespan():
-    """Erstellt den lifespan-Handler (wird später aufgerufen)"""
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        """Lifespan Event Handler - lädt Qwen Text-Modell beim Start"""
-        # Startup
-        logger.model_load("Starte Model Service - Lade nur Qwen Text-Modell beim Start...")
-        
-        # FIX: Nur ein Modell beim Start laden (Qwen) - keine gleichzeitigen Ladevorgänge
-        # Suche nach Qwen-Modell in Config
-        qwen_model_id = None
-        for model_id in model_manager.config.get("models", {}):
-            if "qwen" in model_id.lower():
-                qwen_model_id = model_id
-                break
-        
-        # Fallback: Verwende zuletzt aktiviertes Text-Modell wenn kein Qwen gefunden
-        if not qwen_model_id:
-            last_active = load_last_active_models()
-            if "text" in last_active and last_active["text"]:
-                qwen_model_id = last_active["text"]
-                logger.model_load(f"Kein Qwen-Modell in Config gefunden, verwende zuletzt aktiviertes: {qwen_model_id}")
-        
-        # Lade nur Text-Modell (Qwen oder Fallback)
-        if qwen_model_id:
-            logger.model_load(f"Lade Text-Modell beim Start: {qwen_model_id}")
-            try:
-                # Prüfe ob Modell in Config existiert
-                if qwen_model_id in model_manager.config.get("models", {}):
-                    # Starte asynchrones Laden
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(model_load_executor, _load_text_model_async, qwen_model_id)
-                else:
-                    logger.model_load(f"Modell {qwen_model_id} nicht in Config gefunden", level="warning")
-            except Exception as e:
-                logger.exception(f"Fehler beim Laden des Text-Modells {qwen_model_id}: {e}", tag="MODEL_LOAD")
-        else:
-            logger.model_load("Kein Modell zum Laden beim Start gefunden", level="warning")
-        
-        # Audio- und Image-Modelle werden NICHT beim Start geladen (nur bei Bedarf)
-        logger.model_load("Audio- und Image-Modelle werden nicht beim Start geladen (nur bei Bedarf)")
-        
-        yield
-        
-        # Shutdown (falls nötig)
-        logger.info("Model Service wird beendet...")
-    
-    return lifespan
 
 # Initialisiere App (lifespan wird später gesetzt)
 app = FastAPI(title="Model Service", version="1.0.0")
@@ -1059,27 +1010,94 @@ async def chat(request: ChatRequest, http_request: Request):
         
         # FIX: Synchroner generate() Call muss in Thread-Pool laufen um Event Loop nicht zu blockieren
         import asyncio
-        from concurrent.futures import ThreadPoolExecutor
+        import time
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        
+        logger.debug(f"[DEBUG] Starte Generierung für Chat-Request um {time.strftime('%H:%M:%S')}")
+        generation_start_time = time.time()
         
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            response_text = await loop.run_in_executor(
-                executor,
-                lambda: model_manager.generate(
-                    messages,
-                    max_length=request.max_length,
-                    temperature=request.temperature if request.temperature > 0 else 0.3
+        
+        # Timeout: 2 Minuten für Generierung (falls GPU überlastet ist)
+        # Kürzerer Timeout, damit User schneller Feedback bekommt wenn GPU blockiert ist
+        generation_timeout = 120  # 2 Minuten
+        
+        try:
+            with ThreadPoolExecutor() as executor:
+                future = loop.run_in_executor(
+                    executor,
+                    lambda: model_manager.generate(
+                        messages,
+                        max_length=request.max_length,
+                        temperature=request.temperature if request.temperature > 0 else 0.3
+                    )
                 )
+                # Warte mit Timeout
+                try:
+                    response_text = await asyncio.wait_for(future, timeout=generation_timeout)
+                    generation_duration = time.time() - generation_start_time
+                    logger.debug(f"[DEBUG] Generierung abgeschlossen nach {generation_duration:.2f} Sekunden (innerhalb Timeout)")
+                except asyncio.TimeoutError:
+                    generation_duration = time.time() - generation_start_time
+                    logger.warning(f"[DEBUG] TimeoutError nach {generation_duration:.2f} Sekunden (Timeout: {generation_timeout}s), aber Future läuft noch...")
+                    # WICHTIG: Warte noch kurz, ob Future doch noch fertig wird (Race Condition)
+                    # Wenn GPU überlastet ist, kann es sein, dass die Generierung kurz nach Timeout fertig wird
+                    try:
+                        # Warte noch max. 10 Sekunden auf Completion
+                        response_text = await asyncio.wait_for(future, timeout=10)
+                        generation_duration = time.time() - generation_start_time
+                        logger.info(f"[DEBUG] Generierung doch noch abgeschlossen nach {generation_duration:.2f} Sekunden (nach Timeout)")
+                    except asyncio.TimeoutError:
+                        # Future läuft immer noch - wirklich Timeout
+                        generation_duration = time.time() - generation_start_time
+                        logger.error(f"[DEBUG] Generierung TIMEOUT nach {generation_duration:.2f} Sekunden (Timeout: {generation_timeout}s)")
+                        raise HTTPException(
+                            status_code=504, 
+                            detail=f"Generierung hat zu lange gedauert ({generation_duration:.1f}s). Möglicherweise ist die GPU überlastet (z.B. durch ein laufendes Spiel)."
+                        )
+                
+        except HTTPException:
+            # Re-raise HTTPExceptions (sind bereits korrekt formatiert)
+            raise
+        except asyncio.TimeoutError:
+            # Fallback für TimeoutError (sollte nicht hier ankommen, aber sicherheitshalber)
+            generation_duration = time.time() - generation_start_time
+            logger.error(f"[DEBUG] Generierung TIMEOUT (catch-all) nach {generation_duration:.2f} Sekunden")
+            raise HTTPException(
+                status_code=504, 
+                detail=f"Generierung hat zu lange gedauert ({generation_duration:.1f}s). Möglicherweise ist die GPU überlastet."
+            )
+        except FutureTimeoutError:
+            generation_duration = time.time() - generation_start_time
+            logger.error(f"[DEBUG] Generierung TIMEOUT (Future) nach {generation_duration:.2f} Sekunden")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Generierung hat zu lange gedauert ({generation_duration:.1f}s). Möglicherweise ist die GPU überlastet."
             )
         
-        return {
+        # Prüfe ob Response leer ist
+        if not response_text or not response_text.strip():
+            logger.error(f"Generierung hat leere Response zurückgegeben! response_text: {repr(response_text)}")
+            raise HTTPException(status_code=500, detail="Modell hat keine Antwort generiert (leere Response)")
+        
+        # DEBUG: Logge Response vor Rückgabe
+        logger.debug(f"[DEBUG] Sende Response zurück: Länge={len(response_text)} Zeichen, Vorschau: {response_text[:100]}...")
+        
+        response_dict = {
             "response": response_text,
             "model_id": model_id,
             "conversation_id": request.conversation_id
         }
+        
+        logger.debug(f"[DEBUG] Response-Dict erstellt: response={len(response_text)} chars, model_id={model_id}, conversation_id={request.conversation_id}")
+        
+        return response_dict
+    except HTTPException:
+        # Re-raise HTTPExceptions (sind bereits korrekt formatiert)
+        raise
     except Exception as e:
-        logger.error(f"Fehler bei Chat-Request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Fehler bei Chat-Request: {e}", tag="CHAT_ERROR")
+        raise HTTPException(status_code=500, detail=f"Fehler bei der Generierung: {str(e)}")
 
 
 # Transcribe Endpoint (delegiert an Audio-Modell)
@@ -1270,20 +1288,45 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.model_load("Starte Model Service - Lade nur Qwen Text-Modell beim Start...")
     
-    # FIX: Nur ein Modell beim Start laden (Qwen) - keine gleichzeitigen Ladevorgänge
-    # Suche nach Qwen-Modell in Config
+    # FIX: Verwende default_model aus Config, dann Qwen-Modell, dann zuletzt aktiviertes
     qwen_model_id = None
-    for model_id in model_manager.config.get("models", {}):
-        if "qwen" in model_id.lower():
-            qwen_model_id = model_id
-            break
     
-    # Fallback: Verwende zuletzt aktiviertes Text-Modell wenn kein Qwen gefunden
-    if not qwen_model_id:
-        last_active = load_last_active_models()
-        if "text" in last_active and last_active["text"]:
-            qwen_model_id = last_active["text"]
-            logger.model_load(f"Kein Qwen-Modell in Config gefunden, verwende zuletzt aktiviertes: {qwen_model_id}")
+    # 1. Prüfe default_model aus Config (PRIORITÄT 1)
+    default_model = model_manager.config.get("default_model")
+    logger.model_load(f"DEBUG: default_model aus Config: {default_model}")
+    logger.model_load(f"DEBUG: Verfügbare Modelle: {list(model_manager.config.get('models', {}).keys())}")
+    
+    if default_model and default_model in model_manager.config.get("models", {}):
+        qwen_model_id = default_model
+        logger.model_load(f"✓ Verwende default_model aus Config: {qwen_model_id}")
+    else:
+        logger.model_load(f"DEBUG: default_model nicht gefunden oder nicht in models, suche nach Qwen-Modell...")
+        # 2. Suche nach Qwen-Modell in Config (bevorzuge 7b-instruct)
+        # WICHTIG: Durchlaufe alle Modelle und sammle Qwen-Modelle, dann wähle das beste
+        qwen_models = []
+        for model_id in model_manager.config.get("models", {}):
+            if "qwen" in model_id.lower():
+                qwen_models.append(model_id)
+                logger.model_load(f"DEBUG: Gefundenes Qwen-Modell: {model_id}")
+        
+        # Bevorzuge 7b-instruct wenn verfügbar
+        for model_id in qwen_models:
+            if "7b" in model_id.lower() and "instruct" in model_id.lower():
+                qwen_model_id = model_id
+                logger.model_load(f"✓ Bevorzuge 7b-instruct Modell: {qwen_model_id}")
+                break
+        
+        # Wenn kein 7b-instruct gefunden, nimm erstes Qwen-Modell
+        if not qwen_model_id and qwen_models:
+            qwen_model_id = qwen_models[0]
+            logger.model_load(f"✓ Verwende erstes gefundenes Qwen-Modell: {qwen_model_id}")
+        
+        # 3. Fallback: Verwende zuletzt aktiviertes Text-Modell wenn kein Qwen gefunden
+        if not qwen_model_id:
+            last_active = load_last_active_models()
+            if "text" in last_active and last_active["text"]:
+                qwen_model_id = last_active["text"]
+                logger.model_load(f"Kein Qwen-Modell in Config gefunden, verwende zuletzt aktiviertes: {qwen_model_id}")
     
     # Lade nur Text-Modell (Qwen oder Fallback)
     if qwen_model_id:
@@ -1310,7 +1353,7 @@ async def lifespan(app: FastAPI):
     logger.info("Model Service wird beendet...")
 
 # Setze lifespan für die bereits initialisierte App
-# Die App wurde oben ohne lifespan initialisiert, jetzt setzen wir den Handler
+# FastAPI/Starlette erlaubt es, lifespan nachträglich zu setzen über router
 app.router.lifespan_context = lifespan
 
 

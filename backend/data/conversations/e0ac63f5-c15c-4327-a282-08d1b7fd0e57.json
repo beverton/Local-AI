@@ -1,0 +1,21 @@
+{
+  "id": "e0ac63f5-c15c-4327-a282-08d1b7fd0e57",
+  "title": "woher kommt pizza?",
+  "created_at": "2026-01-09T23:50:18.076880",
+  "updated_at": "2026-01-09T23:52:25.731640",
+  "messages": [
+    {
+      "role": "user",
+      "content": "woher kommt pizza?",
+      "timestamp": "2026-01-09T23:52:25.145429"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "timestamp": "2026-01-09T23:52:25.731631"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

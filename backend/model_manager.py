@@ -290,7 +290,15 @@ class ModelManager:
                 # Wenn device_map="cuda" und kein max_memory: Nutze ganze GPU
                 if device_map == "cuda":
                     # Prüfe ob max_memory in Performance-Settings gesetzt ist
-                    performance_settings = self._load_performance_settings()
+                    # Lade Performance-Settings (wird bereits oben geladen, aber hier nochmal für max_memory)
+                    perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
+                    performance_settings = {}
+                    if os.path.exists(perf_settings_path):
+                        try:
+                            with open(perf_settings_path, 'r', encoding='utf-8') as f:
+                                performance_settings = json.load(f)
+                        except Exception as e:
+                            logger.warning(f"Fehler beim Laden der Performance-Settings: {e}")
                     ui_max_memory_gb = performance_settings.get("max_memory_gb")
                     
                     if ui_max_memory_gb is not None and ui_max_memory_gb > 0:
@@ -871,16 +879,28 @@ class ModelManager:
                         # Versuche im_end_id über Tokenizer zu finden
                         if hasattr(self.tokenizer, 'im_end_id'):
                             im_end_id = self.tokenizer.im_end_id
-                            eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
-                            logger.debug(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id}")
+                            # WICHTIG: Prüfe ob im_end_id != eos_token_id (verhindert Duplikate)
+                            if im_end_id != self.tokenizer.eos_token_id:
+                                eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
+                                logger.debug(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id}")
+                            else:
+                                # im_end_id ist identisch mit eos_token_id, verwende nur eos_token_id
+                                eos_token_id = [self.tokenizer.eos_token_id]
+                                logger.debug(f"[Qwen] im_end_id ist identisch mit eos_token_id ({im_end_id}), verwende nur eos_token_id: {eos_token_id}")
                         else:
                             # Fallback: Versuche über convert_tokens_to_ids
                             im_end_token = "<|im_end|>"
                             if hasattr(self.tokenizer, 'convert_tokens_to_ids'):
                                 im_end_id = self.tokenizer.convert_tokens_to_ids(im_end_token)
                                 if im_end_id is not None and im_end_id != self.tokenizer.unk_token_id:
-                                    eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
-                                    logger.debug(f"[Qwen] Verwende EOS-Token-Liste (via convert_tokens_to_ids): {eos_token_id}")
+                                    # WICHTIG: Prüfe ob im_end_id != eos_token_id (verhindert Duplikate)
+                                    if im_end_id != self.tokenizer.eos_token_id:
+                                        eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
+                                        logger.debug(f"[Qwen] Verwende EOS-Token-Liste (via convert_tokens_to_ids): {eos_token_id}")
+                                    else:
+                                        # im_end_id ist identisch mit eos_token_id, verwende nur eos_token_id
+                                        eos_token_id = [self.tokenizer.eos_token_id]
+                                        logger.debug(f"[Qwen] im_end_id ist identisch mit eos_token_id ({im_end_id}), verwende nur eos_token_id: {eos_token_id}")
                                 else:
                                     # Nur eos_token_id verwenden
                                     eos_token_id = [self.tokenizer.eos_token_id]
@@ -911,7 +931,13 @@ class ModelManager:
                 # Für andere Modelle: Single Integer verwenden
                 if is_qwen:
                     # Qwen: Verwende Liste mit beiden EOS-Tokens
-                    eos_token_id_for_generate = eos_token_id  # Bleibt Liste
+                    # SICHERHEIT: Prüfe ob Liste nicht leer ist
+                    if isinstance(eos_token_id, list) and len(eos_token_id) > 0:
+                        eos_token_id_for_generate = eos_token_id  # Bleibt Liste
+                    else:
+                        # Fallback: Verwende nur eos_token_id als Liste
+                        eos_token_id_for_generate = [self.tokenizer.eos_token_id]
+                        logger.warning(f"[Qwen] EOS-Token-Liste war leer oder ungültig, verwende Fallback: {eos_token_id_for_generate}")
                     logger.debug(f"[Qwen] Verwende EOS-Token-Liste für generate(): {eos_token_id_for_generate}")
                 else:
                     # Andere Modelle: Single Integer
@@ -919,19 +945,84 @@ class ModelManager:
                 
                 logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id={eos_token_id_for_generate}, max_new_tokens={max_new_tokens}, temperature={temperature}")
                 
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature if temperature > 0 else (0.7 if is_mistral else None),
-                    do_sample=temperature > 0,
-                    top_p=0.9 if temperature > 0 else None,
-                    top_k=50 if temperature > 0 and is_mistral else None,  # Top-k für Mistral
-                    repetition_penalty=repetition_penalty,
-                    pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                    eos_token_id=eos_token_id_for_generate,  # Kann jetzt Liste oder Integer sein
-                    no_repeat_ngram_size=3
-                    # early_stopping entfernt - invalid für sampling mode
-                )
+                # DEBUG: GPU-Speicher-Status vor Generierung
+                if torch.cuda.is_available():
+                    gpu_memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_memory_reserved_before = torch.cuda.memory_reserved() / 1024**3  # GB
+                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+                    gpu_memory_usage_percent = (gpu_memory_reserved_before / gpu_memory_total) * 100
+                    
+                    logger.debug(f"[DEBUG] GPU-Speicher VOR generate(): {gpu_memory_before:.2f}GB allocated, {gpu_memory_reserved_before:.2f}GB reserved ({gpu_memory_usage_percent:.1f}% von {gpu_memory_total:.2f}GB)")
+                    
+                    # Warnung wenn GPU-Speicher sehr hoch ist (möglicherweise durch anderes Programm blockiert)
+                    if gpu_memory_usage_percent > 90:
+                        logger.warning(f"[WARNUNG] GPU-Speicher sehr hoch ({gpu_memory_usage_percent:.1f}%)! Möglicherweise blockiert ein anderes Programm (z.B. ein Spiel) die GPU. Generierung könnte langsam sein oder hängen bleiben.")
+                
+                # DEBUG: Timing für Generierung
+                import time
+                import threading
+                generate_start_time = time.time()
+                logger.debug(f"[DEBUG] Starte model.generate() um {time.strftime('%H:%M:%S')}")
+                
+                # Heartbeat-Mechanismus: Logge alle 10 Sekunden, dass Generierung noch läuft
+                heartbeat_stop = threading.Event()
+                heartbeat_thread = None
+                
+                def heartbeat_logger():
+                    """Loggt alle 10 Sekunden, dass Generierung noch läuft"""
+                    elapsed = 0
+                    while not heartbeat_stop.is_set():
+                        time.sleep(10)  # Alle 10 Sekunden
+                        if not heartbeat_stop.is_set():
+                            elapsed = time.time() - generate_start_time
+                            if torch.cuda.is_available():
+                                gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                                logger.warning(f"[HEARTBEAT] Generierung läuft noch... ({elapsed:.1f}s, GPU: {gpu_mem:.2f}GB)")
+                            else:
+                                logger.warning(f"[HEARTBEAT] Generierung läuft noch... ({elapsed:.1f}s)")
+                
+                heartbeat_thread = threading.Thread(target=heartbeat_logger, daemon=True)
+                heartbeat_thread.start()
+                
+                try:
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature if temperature > 0 else (0.7 if is_mistral else None),
+                        do_sample=temperature > 0,
+                        top_p=0.9 if temperature > 0 else None,
+                        top_k=50 if temperature > 0 and is_mistral else None,  # Top-k für Mistral
+                        repetition_penalty=repetition_penalty,
+                        pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
+                        eos_token_id=eos_token_id_for_generate,  # Kann jetzt Liste oder Integer sein
+                        no_repeat_ngram_size=3
+                        # early_stopping entfernt - invalid für sampling mode
+                    )
+                    
+                    # Stoppe Heartbeat
+                    heartbeat_stop.set()
+                    if heartbeat_thread:
+                        heartbeat_thread.join(timeout=1)
+                    
+                    generate_duration = time.time() - generate_start_time
+                    logger.debug(f"[DEBUG] model.generate() abgeschlossen nach {generate_duration:.2f} Sekunden")
+                    
+                except Exception as e:
+                    # Stoppe Heartbeat
+                    heartbeat_stop.set()
+                    if heartbeat_thread:
+                        heartbeat_thread.join(timeout=1)
+                    
+                    generate_duration = time.time() - generate_start_time
+                    logger.error(f"[DEBUG] model.generate() FEHLER nach {generate_duration:.2f} Sekunden: {e}")
+                    raise
+                
+                # DEBUG: GPU-Speicher-Status nach Generierung
+                if torch.cuda.is_available():
+                    gpu_memory_after = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_memory_reserved_after = torch.cuda.memory_reserved() / 1024**3  # GB
+                    logger.debug(f"[DEBUG] GPU-Speicher NACH generate(): {gpu_memory_after:.2f}GB allocated, {gpu_memory_reserved_after:.2f}GB reserved")
+                    logger.debug(f"[DEBUG] GPU-Speicher-Änderung: {gpu_memory_after - gpu_memory_before:.2f}GB allocated, {gpu_memory_reserved_after - gpu_memory_reserved_before:.2f}GB reserved")
                 
                 logger.model_gen(f"AFTER generate(): outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}", level="debug")
                 logger.debug(f"[DEBUG] Generierung abgeschlossen, starte Decoding...")
@@ -968,16 +1059,23 @@ class ModelManager:
                 if eos_positions:
                     new_tokens = new_tokens[:min(eos_positions)]
                 
+                decode_start_time = time.time()
                 response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                decode_duration = time.time() - decode_start_time
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
+                logger.debug(f"[DEBUG] Decoding dauerte {decode_duration:.2f} Sekunden")
                 logger.model_gen(f"Decoding abgeschlossen, Länge: {len(response)} Zeichen", level="debug")
                 
                 # 🔧 NEUE MINIMALISTISCHE BEREINIGUNG
+                clean_start_time = time.time()
                 logger.model_gen(f"Vor Cleaning: {len(response)} Zeichen", level="debug")
                 response = self._clean_response_minimal(response, messages, original_prompt)
+                clean_duration = time.time() - clean_start_time
+                logger.debug(f"[DEBUG] Cleaning dauerte {clean_duration:.2f} Sekunden")
                 logger.model_gen(f"Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...", level="debug")
             
-                logger.model_gen(f"Response fertig, finale Länge: {len(response)} Zeichen", level="debug")
+                total_duration = time.time() - generate_start_time
+                logger.model_gen(f"Response fertig, finale Länge: {len(response)} Zeichen, Gesamt-Dauer: {total_duration:.2f}s (generate: {generate_duration:.2f}s, decode: {decode_duration:.2f}s, clean: {clean_duration:.2f}s)", level="debug")
             return response
         
         except Exception as e:
