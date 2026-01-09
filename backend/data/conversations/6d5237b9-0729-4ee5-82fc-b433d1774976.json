@@ -1,0 +1,21 @@
+{
+  "id": "6d5237b9-0729-4ee5-82fc-b433d1774976",
+  "title": "Erkläre Python Decorators",
+  "created_at": "2026-01-09T17:58:22.978126",
+  "updated_at": "2026-01-09T17:58:23.269264",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Erkläre Python Decorators",
+      "timestamp": "2026-01-09T17:58:23.223832"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "timestamp": "2026-01-09T17:58:23.269257"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

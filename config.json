@@ -10,7 +10,12 @@
       "name": "Qwen 2.5 7B Instruct",
       "path": "G:\\KI Modelle\\coding\\qwen-2.5-7b-instruct",
       "type": "qwen2",
-      "description": "⭐ EMPFOHLEN: Bestes Tool-Use & Web-Search - optimiert für präzise Antworten"
+      "description": "⭐ EMPFOHLEN: Bestes Tool-Use & Web-Search - optimiert für präzise Antworten",
+      "loading": {
+        "device_map": "cuda",
+        "torch_dtype": "float16",
+        "disable_cpu_offload": true
+      }
     },
     "phi-3-mini-4k": {
       "name": "Phi-3 Mini 4K Instruct",
@@ -22,7 +27,12 @@
       "name": "Mistral 7B Instruct",
       "path": "G:\\KI Modelle\\chat\\mistral-7b-instruct\\snapshots\\3ad372fc79158a2148299e3318516c786aeded6c",
       "type": "mistral",
-      "description": "Chat-optimiertes Modell mit CUDA-Unterstützung"
+      "description": "Chat-optimiertes Modell mit CUDA-Unterstützung",
+      "loading": {
+        "device_map": "cuda",
+        "torch_dtype": "float16",
+        "disable_cpu_offload": true
+      }
     },
     "sdxl-base-1.0": {
       "name": "Stable Diffusion XL Base 1.0",

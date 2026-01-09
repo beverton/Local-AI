@@ -1,0 +1,21 @@
+{
+  "id": "29aeb83a-ffbc-48be-b92f-3d46ea2be518",
+  "title": "Was ist 2+2?",
+  "created_at": "2026-01-08T12:19:49.517536",
+  "updated_at": "2026-01-08T12:19:53.800244",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Was ist 2+2?",
+      "timestamp": "2026-01-08T12:19:53.798483"
+    },
+    {
+      "role": "assistant",
+      "content": "<div style='margin-bottom: 1em; font-size: 0.9em; color: #666;'><strong>Quellen:</strong> <a href=\"https://www.google.com/search?q=Was%20ist%202%2B2%3F\" target=\"_blank\" rel=\"noopener noreferrer\">[1] Suche nach: Was ist 2+2?</a></div>\n\n\n\nLink: https://www.google.com/search?q=Was%20ist%202%2B2%3F%0A%0ARelevante%20Informationen%20aus%20verifizierten%20Webquellen%3A%0A%5B1%5D%20Suche%20nach%3A%20Was%20ist%202%2B2%3F%0AKeine%20direkten%20Ergebnisse%20gefunden.%20Suchen%20Sie%20auf%20Google%20nach%20%27Was%20ist%202%2B2%3F%27%20f%C3%BCr%20mehr%20Informationen.%0AURL%3A%20https%3A//www.google.com/search%3Fq%3DWas%2520ist%25202%252B2%253F%0A%0ANutze%20diese%20Informationen%20in%20deiner%20Antwort%20und%20referenziere%20die%20Quellen%20mit%20%5B1%5D%2C%20%5B2%5D%2C%20%5B3%5D%2C%20etc.",
+      "timestamp": "2026-01-08T12:19:53.800238"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

@@ -7,8 +7,10 @@ import os
 import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from logging_utils import get_logger
 
-logger = logging.getLogger(__name__)
+# Strukturierter Logger
+logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "quality_manager.log"))
 
 
 class QualityManager:

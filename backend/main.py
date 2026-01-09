@@ -29,9 +29,8 @@ from preference_learner import PreferenceLearner
 from quality_manager import QualityManager
 
 # Logger muss vor dem try-except verfügbar sein
-import logging
-logging.basicConfig(level=logging.INFO)
-_temp_logger = logging.getLogger(__name__)
+from logging_utils import get_logger
+_temp_logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "main_server.log"))
 
 # ImageManager optional importieren (kann ohne diffusers fehlschlagen)
 try:
@@ -54,8 +53,7 @@ import numpy as np
 from scipy.io import wavfile
 from PIL import Image
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "main_server.log"))
 
 app = FastAPI(title="Local AI Service")
 
@@ -1055,6 +1053,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             # Prüfe ob Frage Web-Search benötigt (Fakten, aktuelle Infos, etc.)
             if quality_manager._needs_web_search(request.message):
                 try:
+                    logger.quality(f"RAG aktiviert: Starte Web-Search für '{request.message[:100]}...'")
                     # Web-Search durchführen (SYNCHRON - vor Generierung!)
                     # WICHTIG: Expliziter Timeout von 5 Sekunden um Blockierung zu vermeiden
                     search_results = quality_manager.web_search(request.message, max_results=5, timeout=5.0)
@@ -1068,9 +1067,9 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                         # Füge Kontext zur User-Nachricht hinzu (ChatAgent nutzt diese)
                         enhanced_message = f"{request.message}\n\nRelevante Informationen aus verifizierten Webquellen:\n{sources_context}\n\nNutze diese Informationen in deiner Antwort und referenziere die Quellen mit [1], [2], [3], etc."
                         
-                        logger.info(f"RAG aktiviert (ChatAgent): {len(sources)} Quellen als Kontext hinzugefügt")
+                        logger.quality(f"RAG erfolgreich: {len(sources)} Quellen als Kontext hinzugefügt")
                 except Exception as e:
-                    logger.warning(f"RAG Web-Search fehlgeschlagen: {e}, fahre ohne Kontext fort")
+                    logger.quality(f"RAG Web-Search fehlgeschlagen: {e}, fahre ohne Kontext fort", level="warning")
         
         # Erstelle oder hole ChatAgent für diese Conversation
         conversation_agents = agent_manager.get_conversation_agents(conversation_id)
@@ -1093,7 +1092,9 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             chat_agent = agent_manager.get_agent(conversation_id, agent_id)
         
         # Nutze ChatAgent für Antwort-Generierung (mit RAG-Kontext wenn vorhanden)
+        logger.chat(f"Starte Antwort-Generierung mit ChatAgent (enhanced_message_length={len(enhanced_message)})")
         response = chat_agent.process_message(enhanced_message)
+        logger.chat(f"Antwort-Generierung abgeschlossen: response_length={len(response)}")
         
         # ==========================================
         # PHASE 2: Post-Processing (Validation + Retry) - auch für ChatAgent

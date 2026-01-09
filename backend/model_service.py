@@ -19,10 +19,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
+from logging_utils import get_logger
+from contextlib import asynccontextmanager
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Setup logging - verwende StructuredLogger
+logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "model_service.log"))
 
 # Add backend directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -41,7 +42,58 @@ except Exception as e:
     logger.warning(f"ImageManager konnte nicht geladen werden: {e}")
     ImageManager = None
 
-# Initialize FastAPI app
+# Lifespan-Handler wird später definiert (nach allen benötigten Definitionen)
+# App wird hier initialisiert, lifespan wird später gesetzt
+def _create_lifespan():
+    """Erstellt den lifespan-Handler (wird später aufgerufen)"""
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Lifespan Event Handler - lädt Qwen Text-Modell beim Start"""
+        # Startup
+        logger.model_load("Starte Model Service - Lade nur Qwen Text-Modell beim Start...")
+        
+        # FIX: Nur ein Modell beim Start laden (Qwen) - keine gleichzeitigen Ladevorgänge
+        # Suche nach Qwen-Modell in Config
+        qwen_model_id = None
+        for model_id in model_manager.config.get("models", {}):
+            if "qwen" in model_id.lower():
+                qwen_model_id = model_id
+                break
+        
+        # Fallback: Verwende zuletzt aktiviertes Text-Modell wenn kein Qwen gefunden
+        if not qwen_model_id:
+            last_active = load_last_active_models()
+            if "text" in last_active and last_active["text"]:
+                qwen_model_id = last_active["text"]
+                logger.model_load(f"Kein Qwen-Modell in Config gefunden, verwende zuletzt aktiviertes: {qwen_model_id}")
+        
+        # Lade nur Text-Modell (Qwen oder Fallback)
+        if qwen_model_id:
+            logger.model_load(f"Lade Text-Modell beim Start: {qwen_model_id}")
+            try:
+                # Prüfe ob Modell in Config existiert
+                if qwen_model_id in model_manager.config.get("models", {}):
+                    # Starte asynchrones Laden
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(model_load_executor, _load_text_model_async, qwen_model_id)
+                else:
+                    logger.model_load(f"Modell {qwen_model_id} nicht in Config gefunden", level="warning")
+            except Exception as e:
+                logger.exception(f"Fehler beim Laden des Text-Modells {qwen_model_id}: {e}", tag="MODEL_LOAD")
+        else:
+            logger.model_load("Kein Modell zum Laden beim Start gefunden", level="warning")
+        
+        # Audio- und Image-Modelle werden NICHT beim Start geladen (nur bei Bedarf)
+        logger.model_load("Audio- und Image-Modelle werden nicht beim Start geladen (nur bei Bedarf)")
+        
+        yield
+        
+        # Shutdown (falls nötig)
+        logger.info("Model Service wird beendet...")
+    
+    return lifespan
+
+# Initialisiere App (lifespan wird später gesetzt)
 app = FastAPI(title="Model Service", version="1.0.0")
 
 # CORS für alle Clients
@@ -338,7 +390,7 @@ class ChatRequest(BaseModel):
     messages: Optional[List[Dict[str, str]]] = None  # Vollständige Messages-Liste (mit System-Prompt und History)
     conversation_id: Optional[str] = None
     max_length: int = 2048
-    temperature: float = 0.7
+    temperature: float = 0.3  # Default: 0.3 für bessere Qualität (konsistent mit Frontend)
     language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en")
 
 
@@ -401,29 +453,61 @@ def _safe_delete_file(file_path: str, max_retries: int = 3, delay: float = 0.1):
 
 @app.get("/status")
 async def get_status():
-    """Gibt Status aller Modelle zurück"""
+    """Gibt Status aller Modelle zurück (inkl. Memory-Informationen)"""
+    import torch
+    
+    # Text-Modell Status mit Memory-Info
+    text_status = {
+        "loaded": model_manager.is_model_loaded(),
+        "model_id": model_manager.get_current_model(),
+        "loading": loading_status["text"]["loading"],
+        "error": loading_status["text"]["error"],
+        "active_clients": get_active_clients("text", model_manager.get_current_model() or "") if model_manager.is_model_loaded() else []
+    }
+    
+    # Memory-Informationen für Text-Modell
+    if text_status["loaded"] and torch.cuda.is_available():
+        try:
+            # GPU Memory Usage
+            gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
+            gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)  # GB
+            gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            gpu_memory_free = gpu_memory_total - gpu_memory_reserved
+            
+            text_status["memory"] = {
+                "gpu_allocated_gb": round(gpu_memory_allocated, 2),
+                "gpu_reserved_gb": round(gpu_memory_reserved, 2),
+                "gpu_total_gb": round(gpu_memory_total, 2),
+                "gpu_free_gb": round(gpu_memory_free, 2),
+                "gpu_usage_percent": round((gpu_memory_reserved / gpu_memory_total) * 100, 1) if gpu_memory_total > 0 else 0
+            }
+        except Exception as e:
+            logger.model_load(f"Fehler beim Ermitteln der GPU-Memory-Info: {e}", level="warning")
+            text_status["memory"] = None
+    
+    # Audio-Modell Status
+    audio_status = {
+        "loaded": whisper_manager.is_model_loaded(),
+        "model_id": whisper_manager.get_current_model(),
+        "loading": loading_status["audio"]["loading"],
+        "error": loading_status["audio"]["error"],
+        "active_clients": get_active_clients("audio", whisper_manager.get_current_model() or "") if whisper_manager.is_model_loaded() else []
+    }
+    
+    # Image-Modell Status
+    image_status = {
+        "loaded": image_manager.is_model_loaded() if image_manager else False,
+        "model_id": image_manager.get_current_model() if image_manager else None,
+        "loading": loading_status["image"]["loading"],
+        "error": loading_status["image"]["error"],
+        "active_clients": get_active_clients("image", image_manager.get_current_model() or "") if (image_manager and image_manager.is_model_loaded()) else []
+    }
+    
     return {
-        "text_model": {
-            "loaded": model_manager.is_model_loaded(),
-            "model_id": model_manager.get_current_model(),
-            "loading": loading_status["text"]["loading"],
-            "error": loading_status["text"]["error"],
-            "active_clients": get_active_clients("text", model_manager.get_current_model() or "") if model_manager.is_model_loaded() else []
-        },
-        "audio_model": {
-            "loaded": whisper_manager.is_model_loaded(),
-            "model_id": whisper_manager.get_current_model(),
-            "loading": loading_status["audio"]["loading"],
-            "error": loading_status["audio"]["error"],
-            "active_clients": get_active_clients("audio", whisper_manager.get_current_model() or "") if whisper_manager.is_model_loaded() else []
-        },
-        "image_model": {
-            "loaded": image_manager.is_model_loaded() if image_manager else False,
-            "model_id": image_manager.get_current_model() if image_manager else None,
-            "loading": loading_status["image"]["loading"],
-            "error": loading_status["image"]["error"],
-            "active_clients": get_active_clients("image", image_manager.get_current_model() or "") if (image_manager and image_manager.is_model_loaded()) else []
-        }
+        "text_model": text_status,
+        "audio_model": audio_status,
+        "image_model": image_status,
+        "timestamp": datetime.now().isoformat()
     }
 
 
@@ -475,67 +559,118 @@ async def health_check():
 def _load_text_model_async(model_id: str):
     """Lädt ein Text-Modell asynchron"""
     try:
+        logger.model_load(f"Starte asynchrones Laden: {model_id}")
+        logger.model_load(f"Thread: {threading.current_thread().name}, PID: {os.getpid()}")
+        
         loading_status["text"]["loading"] = True
         loading_status["text"]["model_id"] = model_id
         loading_status["text"]["error"] = None
         
-        logger.info(f"Starte asynchrones Laden des Text-Modells: {model_id}")
+        # Prüfe ob Modell in Config existiert
+        if model_id not in model_manager.config.get("models", {}):
+            error_msg = f"Modell {model_id} nicht in Config gefunden"
+            logger.error_log(error_msg)
+            loading_status["text"]["loading"] = False
+            loading_status["text"]["error"] = error_msg
+            return
+        
+        model_info = model_manager.config["models"][model_id]
+        model_path = model_info.get("path", "")
+        logger.model_load(f"Modell-Pfad: {model_path}")
+        
+        # Prüfe ob Pfad existiert
+        if not os.path.exists(model_path):
+            error_msg = f"Modell-Pfad existiert nicht: {model_path}"
+            logger.error_log(error_msg)
+            loading_status["text"]["loading"] = False
+            loading_status["text"]["error"] = error_msg
+            return
+        
+        logger.model_load("Rufe model_manager.load_model() auf...")
+        start_time = time.time()
         success = model_manager.load_model(model_id)
+        load_time = time.time() - start_time
+        logger.model_load(f"model_manager.load_model() zurückgegeben: success={success}, Dauer: {load_time:.2f}s")
         
         if success:
             # Prüfe ob Modell wirklich geladen ist
-            if model_manager.is_model_loaded() and model_manager.get_current_model() == model_id:
-                logger.info(f"Text-Modell erfolgreich geladen: {model_id}")
+            is_loaded = model_manager.is_model_loaded()
+            current_model = model_manager.get_current_model()
+            logger.model_load(f"Status-Prüfung: is_loaded={is_loaded}, current_model={current_model}, erwartet={model_id}")
+            
+            if is_loaded and current_model == model_id:
+                logger.model_load(f"✓ Text-Modell erfolgreich geladen: {model_id}")
                 loading_status["text"]["loading"] = False
                 loading_status["text"]["error"] = None
             else:
-                error_msg = "Modell wurde geladen, aber Status-Prüfung fehlgeschlagen"
-                logger.error(error_msg)
+                error_msg = f"Status-Prüfung fehlgeschlagen: is_loaded={is_loaded}, current_model={current_model}, erwartet={model_id}"
+                logger.error_log(error_msg)
                 loading_status["text"]["loading"] = False
                 loading_status["text"]["error"] = error_msg
         else:
-            error_msg = f"Fehler beim Laden des Modells: {model_id}"
-            logger.error(error_msg)
+            error_msg = f"model_manager.load_model() gab False zurück für Modell: {model_id}"
+            logger.error_log(error_msg)
+            logger.model_load(f"model_manager Status: is_loaded={model_manager.is_model_loaded()}, current_model={model_manager.get_current_model()}")
             loading_status["text"]["loading"] = False
             loading_status["text"]["error"] = error_msg
     except Exception as e:
-        error_msg = f"Exception beim Laden des Text-Modells: {str(e)}"
-        logger.error(error_msg)
-        import traceback
-        logger.error(traceback.format_exc())
+        error_msg = f"Exception beim Laden des Text-Modells {model_id}: {str(e)}"
+        logger.exception(error_msg, tag="MODEL_LOAD")
         loading_status["text"]["loading"] = False
         loading_status["text"]["error"] = error_msg
 
 @app.post("/models/text/load")
 async def load_text_model(request: LoadModelRequest):
-    """Lädt ein Text-Modell (asynchron)"""
-    # Prüfe ob bereits ein Modell geladen wird
+    """Lädt ein Text-Modell (nur ein Modell gleichzeitig, automatisches Entladen)"""
+    model_id = request.model_id
+    
+    # FIX: Prüfe ob bereits ein Modell geladen wird (verhindere gleichzeitige Ladevorgänge)
+    # WICHTIG: Prüfe loading_status BEVOR wir es setzen (Race Condition vermeiden)
     if loading_status["text"]["loading"]:
+        current_loading = loading_status["text"]["model_id"]
+        logger.model_load(f"Ladevorgang bereits aktiv: {current_loading}, warte auf Abschluss...")
         return {
             "status": "loading",
-            "message": f"Modell {loading_status['text']['model_id']} wird bereits geladen",
-            "model_id": loading_status["text"]["model_id"]
+            "message": f"Modell wird bereits geladen: {current_loading}. Bitte warten Sie.",
+            "model_id": current_loading
         }
     
     # Prüfe ob Modell bereits geladen ist
-    if model_manager.is_model_loaded() and model_manager.get_current_model() == request.model_id:
+    if model_manager.is_model_loaded() and model_manager.get_current_model() == model_id:
+        logger.model_load(f"Modell bereits geladen: {model_id}")
         return {
             "status": "success",
-            "model_id": request.model_id,
+            "model_id": model_id,
             "message": "Modell ist bereits geladen"
         }
     
-    # Speichere als zuletzt aktiviertes Modell
-    save_last_active_model("text", request.model_id)
+    # FIX: Setze loading_status SOFORT um Race Conditions zu vermeiden
+    loading_status["text"]["loading"] = True
+    loading_status["text"]["model_id"] = model_id
+    loading_status["text"]["error"] = None
     
-    # Starte asynchrones Laden
+    # FIX: Wenn anderes Modell geladen ist, entlade es zuerst
+    if model_manager.is_model_loaded():
+        current_model = model_manager.get_current_model()
+        if current_model != model_id:
+            logger.model_load(f"Entlade aktuelles Modell {current_model} vor Laden von {model_id}...")
+            model_manager.unload_model()
+            # Warte kurz damit Entladen abgeschlossen ist
+            import time
+            time.sleep(1)
+    
+    # Speichere als zuletzt aktiviertes Modell
+    save_last_active_model("text", model_id)
+    
+    # Starte asynchrones Laden (nur ein Modell gleichzeitig)
+    logger.model_load(f"Starte Laden von Text-Modell: {model_id}")
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(model_load_executor, _load_text_model_async, request.model_id)
+    loop.run_in_executor(model_load_executor, _load_text_model_async, model_id)
     
     return {
         "status": "loading",
-        "message": f"Modell {request.model_id} wird geladen",
-        "model_id": request.model_id
+        "message": f"Modell {model_id} wird geladen",
+        "model_id": model_id
     }
 
 
@@ -884,17 +1019,6 @@ async def get_image_model_status():
 @app.post("/chat")
 async def chat(request: ChatRequest, http_request: Request):
     """Chat-Request - delegiert an geladenes Text-Modell"""
-    # #region agent log
-    import json as json_log_svc; import time as time_svc; from datetime import datetime; 
-    start_time = time_svc.time()
-    request_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    user_message = request.message[:100] if request.message else (request.messages[-1]["content"][:100] if request.messages else "no message")
-    log_data_svc = {"location": "model_service.py:888", "message": f"🟢 ANFRAGE START um {request_time_str}", "data": {"user_message": user_message, "model_loaded": model_manager.is_model_loaded(), "loading_status": loading_status["text"]["loading"], "current_model": model_manager.get_current_model(), "timestamp_str": request_time_str}, "timestamp": start_time * 1000, "sessionId": "debug-session", "hypothesisId": "B,E"}; 
-    try:
-        with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_svc) + '\n')
-    except: pass
-    # #endregion
-    
     if not model_manager.is_model_loaded():
         raise HTTPException(status_code=400, detail="Kein Text-Modell geladen")
     
@@ -948,31 +1072,12 @@ async def chat(request: ChatRequest, http_request: Request):
                 )
             )
         
-        # #region agent log
-        end_time = time_svc.time()
-        duration = end_time - start_time
-        end_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        log_data_end = {"location": "model_service.py:960", "message": f"🔵 ANTWORT FERTIG um {end_time_str}", "data": {"response_length": len(response_text), "duration_seconds": round(duration, 2), "start_time": request_time_str, "end_time": end_time_str, "success": True}, "timestamp": end_time * 1000, "sessionId": "debug-session", "hypothesisId": "timing"}; 
-        try:
-            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_end) + '\n')
-        except: pass
-        # #endregion
-        
         return {
             "response": response_text,
             "model_id": model_id,
             "conversation_id": request.conversation_id
         }
     except Exception as e:
-        # #region agent log
-        try:
-            error_time = time_svc.time()
-            duration = error_time - start_time
-            error_time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            log_data_err = {"location": "model_service.py:976", "message": f"🔴 FEHLER um {error_time_str}", "data": {"error": str(e), "duration_seconds": round(duration, 2), "start_time": request_time_str, "error_time": error_time_str}, "timestamp": error_time * 1000, "sessionId": "debug-session", "hypothesisId": "timing"}; 
-            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_svc.dumps(log_data_err) + '\n')
-        except: pass
-        # #endregion
         logger.error(f"Fehler bei Chat-Request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1157,57 +1262,56 @@ async def root():
     return {"message": "Model Service API", "status": "running", "version": "1.0.0"}
 
 
-# Startup Event - Lade zuletzt aktivierte Modelle
-@app.on_event("startup")
-async def startup_event():
-    """Lädt zuletzt aktivierte Modelle beim Start"""
-    logger.info("Starte Model Service - Lade zuletzt aktivierte Modelle...")
-    last_active = load_last_active_models()
+# Lifespan Event Handler (ersetzt deprecated on_event)
+# Muss nach allen Definitionen (model_manager, load_last_active_models, _load_text_model_async) stehen
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan Event Handler - lädt Qwen Text-Modell beim Start"""
+    # Startup
+    logger.model_load("Starte Model Service - Lade nur Qwen Text-Modell beim Start...")
     
-    # Lade Text-Modell
-    if "text" in last_active and last_active["text"]:
-        model_id = last_active["text"]
-        logger.info(f"Lade zuletzt aktiviertes Text-Modell: {model_id}")
+    # FIX: Nur ein Modell beim Start laden (Qwen) - keine gleichzeitigen Ladevorgänge
+    # Suche nach Qwen-Modell in Config
+    qwen_model_id = None
+    for model_id in model_manager.config.get("models", {}):
+        if "qwen" in model_id.lower():
+            qwen_model_id = model_id
+            break
+    
+    # Fallback: Verwende zuletzt aktiviertes Text-Modell wenn kein Qwen gefunden
+    if not qwen_model_id:
+        last_active = load_last_active_models()
+        if "text" in last_active and last_active["text"]:
+            qwen_model_id = last_active["text"]
+            logger.model_load(f"Kein Qwen-Modell in Config gefunden, verwende zuletzt aktiviertes: {qwen_model_id}")
+    
+    # Lade nur Text-Modell (Qwen oder Fallback)
+    if qwen_model_id:
+        logger.model_load(f"Lade Text-Modell beim Start: {qwen_model_id}")
         try:
             # Prüfe ob Modell in Config existiert
-            if model_id in model_manager.config.get("models", {}):
+            if qwen_model_id in model_manager.config.get("models", {}):
                 # Starte asynchrones Laden
                 loop = asyncio.get_event_loop()
-                loop.run_in_executor(model_load_executor, _load_text_model_async, model_id)
+                loop.run_in_executor(model_load_executor, _load_text_model_async, qwen_model_id)
             else:
-                logger.warning(f"Zuletzt aktiviertes Text-Modell {model_id} nicht in Config gefunden")
+                logger.model_load(f"Modell {qwen_model_id} nicht in Config gefunden", level="warning")
         except Exception as e:
-            logger.error(f"Fehler beim Laden des zuletzt aktivierten Text-Modells: {e}")
+            logger.exception(f"Fehler beim Laden des Text-Modells {qwen_model_id}: {e}", tag="MODEL_LOAD")
+    else:
+        logger.model_load("Kein Modell zum Laden beim Start gefunden", level="warning")
     
-    # Lade Audio-Modell
-    if "audio" in last_active and last_active["audio"]:
-        model_id = last_active["audio"]
-        logger.info(f"Lade zuletzt aktiviertes Audio-Modell: {model_id}")
-        try:
-            if model_id in model_manager.config.get("models", {}):
-                success = whisper_manager.load_model(model_id)
-                if success:
-                    logger.info(f"Audio-Modell {model_id} erfolgreich geladen")
-                else:
-                    logger.warning(f"Fehler beim Laden des Audio-Modells {model_id}")
-            else:
-                logger.warning(f"Zuletzt aktiviertes Audio-Modell {model_id} nicht in Config gefunden")
-        except Exception as e:
-            logger.error(f"Fehler beim Laden des zuletzt aktivierten Audio-Modells: {e}")
+    # Audio- und Image-Modelle werden NICHT beim Start geladen (nur bei Bedarf)
+    logger.model_load("Audio- und Image-Modelle werden nicht beim Start geladen (nur bei Bedarf)")
     
-    # Lade Image-Modell
-    if "image" in last_active and last_active["image"] and image_manager:
-        model_id = last_active["image"]
-        logger.info(f"Lade zuletzt aktiviertes Image-Modell: {model_id}")
-        try:
-            if model_id in model_manager.config.get("models", {}):
-                # Starte asynchrones Laden
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(model_load_executor, _load_image_model_async, model_id)
-            else:
-                logger.warning(f"Zuletzt aktiviertes Image-Modell {model_id} nicht in Config gefunden")
-        except Exception as e:
-            logger.error(f"Fehler beim Laden des zuletzt aktivierten Image-Modells: {e}")
+    yield
+    
+    # Shutdown (falls nötig)
+    logger.info("Model Service wird beendet...")
+
+# Setze lifespan für die bereits initialisierte App
+# Die App wurde oben ohne lifespan initialisiert, jetzt setzen wir den Handler
+app.router.lifespan_context = lifespan
 
 
 # Restart Endpoint

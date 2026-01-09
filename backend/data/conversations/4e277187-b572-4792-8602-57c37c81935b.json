@@ -1,0 +1,21 @@
+{
+  "id": "4e277187-b572-4792-8602-57c37c81935b",
+  "title": "Was ist 2+2?",
+  "created_at": "2026-01-08T12:13:31.572038",
+  "updated_at": "2026-01-08T12:13:31.626308",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Was ist 2+2?",
+      "timestamp": "2026-01-08T12:13:31.624752"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "timestamp": "2026-01-08T12:13:31.626302"
+    }
+  ],
+  "model_id": null,
+  "conversation_type": "chat",
+  "file_mode": false
+}

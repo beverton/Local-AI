@@ -45,3 +45,6 @@ except Exception as e:
     print("  2. Stellen Sie sicher, dass Sie genug Speicherplatz haben (~15 GB)")
     print("  3. Falls HuggingFace Login nötig: huggingface-cli login")
 
+
+
+

@@ -1,9 +1,9 @@
 {
-  "web_validation": true,
-  "contradiction_check": true,
-  "hallucination_check": true,
-  "actuality_check": true,
-  "source_quality_check": true,
-  "completeness_check": true,
-  "auto_web_search": true
+  "web_validation": false,
+  "contradiction_check": false,
+  "hallucination_check": false,
+  "actuality_check": false,
+  "source_quality_check": false,
+  "completeness_check": false,
+  "auto_web_search": false
 }

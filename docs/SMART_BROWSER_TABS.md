@@ -98,3 +98,6 @@ Das Smart Browser Tab Management ist automatisch in folgende Skripte integriert:
 - ✅ `stop_server.bat` - Löscht Tab-Status beim Beenden
 - ✅ Vollautomatisch, keine Konfiguration nötig
 
+
+
+

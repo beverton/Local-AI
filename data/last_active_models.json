@@ -1,5 +1,4 @@
 {
   "text": "qwen-2.5-7b-instruct",
-  "audio": "whisper-large-v3",
-  "image": "sdxl-base-1.0"
+  "audio": "whisper-large-v3"
 }

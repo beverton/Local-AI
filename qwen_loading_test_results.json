@@ -1,0 +1,95 @@
+[
+  {
+    "method": "Method 1: device_map=cuda, float16 (AKTUELL)",
+    "load_time_seconds": 180.89,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 14.21,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 0.77,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "cuda",
+      "torch_dtype": "float16"
+    }
+  },
+  {
+    "method": "Method 2: device_map=auto, float16",
+    "load_time_seconds": 4.81,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 11.88,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 0.6,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "auto",
+      "torch_dtype": "float16"
+    }
+  },
+  {
+    "method": "Method 3: device_map=cuda, bfloat16",
+    "load_time_seconds": 6.49,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 2.33,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 0.29,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "cuda",
+      "torch_dtype": "bfloat16"
+    }
+  },
+  {
+    "method": "Method 4: device_map=auto, bfloat16",
+    "load_time_seconds": 5.5,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 11.88,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 1.4,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "auto",
+      "torch_dtype": "bfloat16"
+    }
+  },
+  {
+    "method": "Method 5: device_map=cuda, float16, 8-bit Quantisierung",
+    "load_time_seconds": 11.93,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 0.01,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 0.39,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "auto",
+      "torch_dtype": "float16",
+      "use_quantization": true,
+      "quantization_bits": 8
+    }
+  },
+  {
+    "method": "Method 6: device_map=cuda, float16, Flash Attention",
+    "load_time_seconds": 4.79,
+    "load_success": true,
+    "error": null,
+    "gpu_memory_used_gb": 14.19,
+    "gpu_memory_total_gb": 15.93,
+    "inference_time_seconds": 0.11,
+    "inference_success": true,
+    "response_length": 1,
+    "config": {
+      "device_map": "cuda",
+      "torch_dtype": "float16",
+      "use_flash_attention": true
+    }
+  }
+]

@@ -5,12 +5,19 @@ import json
 import os
 import time
 from typing import Optional, Dict, Any, List
+
+# Setze PyTorch CUDA Allocator Config für besseres Memory Management (MUSS vor torch import sein)
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import logging
+import os
+from logging_utils import get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Strukturierter Logger
+logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "model_manager.log"))
 
 
 class ModelManager:
@@ -277,15 +284,26 @@ class ModelManager:
             
             if custom_device_map is not None:
                 device_map = custom_device_map
-                # Wenn device_map="cuda" explizit gesetzt, aber nicht genug Speicher: Warnung und Fallback
-                if device_map == "cuda" and available_gpu_memory_gb is not None and available_gpu_memory_gb < 8.0:
-                    logger.warning(
-                        f"device_map='cuda' gesetzt, aber nur {available_gpu_memory_gb:.1f}GB verfügbar. "
-                        f"Falle zurück auf device_map='auto' mit max_memory um OOM zu vermeiden."
-                    )
-                    device_map = "auto"
-                    max_memory_gb = int(available_gpu_memory_gb * 0.9)  # 90% des verfügbaren Speichers
-                    max_memory = {0: f"{max_memory_gb}GB"}
+                # FIX: Verwende device_map="cuda" wenn genug GPU-Speicher verfügbar ist
+                # max_memory wird jetzt über UI/API konfigurierbar sein
+                # Wenn device_map="cuda" und max_memory gesetzt: Verwende max_memory als Limit
+                # Wenn device_map="cuda" und kein max_memory: Nutze ganze GPU
+                if device_map == "cuda":
+                    # Prüfe ob max_memory in Performance-Settings gesetzt ist
+                    performance_settings = self._load_performance_settings()
+                    ui_max_memory_gb = performance_settings.get("max_memory_gb")
+                    
+                    if ui_max_memory_gb is not None and ui_max_memory_gb > 0:
+                        # max_memory wurde im UI gesetzt - verwende es
+                        max_memory = {0: f"{ui_max_memory_gb}GB"}
+                        logger.model_load(f"max_memory aus UI/Performance-Settings: {ui_max_memory_gb}GB")
+                    else:
+                        # Kein max_memory gesetzt - nutze ganze GPU (kein max_memory Parameter)
+                        max_memory = None
+                        logger.model_load("device_map='cuda' - nutze ganze GPU (kein max_memory Limit)")
+                    
+                    # device_map="cuda" bedeutet: Modell komplett auf GPU, kein CPU-Offloading
+                    disable_cpu_offload = True
             else:
                 if self.device == "cuda":
                     if use_quantization:
@@ -326,16 +344,20 @@ class ModelManager:
                 f"quantization_bits={quantization_bits}, model_specific={has_model_specific}"
             )
             
+            # OPTIMIERUNG: Bei device_map="cuda" sollte max_memory NICHT gesetzt werden (nutzt ganze GPU)
+            # max_memory wird nur bei device_map="auto" benötigt
             model_kwargs = {
                 "torch_dtype": torch_dtype,
                 "device_map": device_map,
                 "trust_remote_code": True,
-                "low_cpu_mem_usage": True  # Reduziert CPU-Speicher während des Ladens
+                "low_cpu_mem_usage": True,  # Reduziert CPU-Speicher während des Ladens
             }
             
-            # Füge max_memory hinzu wenn gesetzt
-            if max_memory is not None:
+            # Füge max_memory nur hinzu wenn gesetzt UND device_map="auto" (nicht bei "cuda")
+            if max_memory is not None and device_map == "auto":
                 model_kwargs["max_memory"] = max_memory
+                # Setze Umgebungsvariable um caching_allocator_warmup zu deaktivieren
+                os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
             
             # Quantisierung (8-bit/4-bit) mit bitsandbytes
             if use_quantization and self.device == "cuda":
@@ -381,42 +403,46 @@ class ModelManager:
                     # Fallback wenn attn_implementation nicht unterstützt wird
                     logger.debug("attn_implementation nicht unterstützt, Flash Attention wird automatisch verwendet wenn verfügbar")
             
+            logger.model_load(f"Lade Modell mit device_map={device_map}, torch_dtype={torch_dtype}, max_memory={max_memory}...")
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 **model_kwargs
             )
+            logger.model_load("Modell-Objekt erstellt, prüfe Device-Platzierung...")
             
             if self.device == "cpu":
                 self.model = self.model.to(self.device)
             elif self.device == "cuda" and hasattr(self.model, 'hf_device_map'):
-                # FIX: Validiere dass Modell wirklich auf GPU geladen wurde (nicht "meta" device)
-                logger.info("Validiere dass Modell auf echten GPU-Devices geladen wurde...")
-                meta_modules = []
-                for name, module in self.model.named_modules():
-                    try:
-                        first_param = next(module.parameters(), None)
-                        if first_param is not None and str(first_param.device) == "meta":
-                            meta_modules.append(name)
-                    except StopIteration:
-                        continue
-                
-                if meta_modules:
-                    error_msg = f"Modell wurde nicht korrekt geladen - folgende Module sind auf 'meta' device: {meta_modules[:5]}"
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                logger.info("✓ Alle Module erfolgreich auf GPU geladen (kein 'meta' device)")
+                # OPTIMIERUNG: Nur bei device_map="auto" validieren (bei "cuda" ist Validierung nicht nötig)
+                # Bei device_map="cuda" wird das Modell direkt auf GPU geladen, daher keine "meta" device Probleme
+                if device_map == "auto":
+                    # OPTIMIERUNG: Stichproben-Validierung statt alle Module prüfen (viel schneller)
+                    logger.info("Validiere dass Modell auf echten GPU-Devices geladen wurde (Stichprobe)...")
+                    meta_modules = []
+                    # Prüfe nur eine Stichprobe von Modulen (erste 10 + letzte 10) statt alle
+                    all_modules = list(self.model.named_modules())
+                    sample_modules = all_modules[:10] + all_modules[-10:] if len(all_modules) > 20 else all_modules
+                    
+                    for name, module in sample_modules:
+                        try:
+                            first_param = next(module.parameters(), None)
+                            if first_param is not None and str(first_param.device) == "meta":
+                                meta_modules.append(name)
+                        except StopIteration:
+                            continue
+                    
+                    if meta_modules:
+                        error_msg = f"Modell wurde nicht korrekt geladen - folgende Module sind auf 'meta' device: {meta_modules[:5]}"
+                        logger.error_log(f"{error_msg} (Gesamt {len(meta_modules)} Module auf 'meta' device in Stichprobe)")
+                        raise RuntimeError(error_msg)
+                    
+                    logger.model_load("✓ Stichproben-Validierung erfolgreich (kein 'meta' device gefunden)")
+                else:
+                    # Bei device_map="cuda" ist Validierung nicht nötig - Modell ist direkt auf GPU
+                    logger.model_load("✓ Modell direkt auf GPU geladen (device_map='cuda', keine Validierung nötig)")
             
-            # Prüfe Performance-Settings für torch.compile()
-            use_torch_compile = False
-            try:
-                perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
-                if os.path.exists(perf_settings_path):
-                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
-                        perf_settings = json.load(f)
-                        use_torch_compile = perf_settings.get("use_torch_compile", False)
-            except:
-                pass
+            # Prüfe Performance-Settings für torch.compile() (wiederverwende bereits geladene perf_settings)
+            use_torch_compile = perf_settings.get("use_torch_compile", False)
             
             # torch.compile() Support (PyTorch 2.0+)
             if use_torch_compile:
@@ -436,13 +462,15 @@ class ModelManager:
                     logger.warning(f"Fehler bei torch.compile(): {e}, verwende unkompiliertes Modell")
             
             self.current_model_id = model_id
-            logger.info(f"Modell erfolgreich geladen: {model_id}")
+            logger.model_load(f"✓ Modell erfolgreich geladen: {model_id}")
+            logger.model_load(f"Modell-Info: device={self.device}, dtype={type(self.model.dtype) if hasattr(self.model, 'dtype') else 'N/A'}")
             return True
             
         except Exception as e:
-            logger.error(f"Fehler beim Laden des Modells: {e}")
+            logger.exception(f"Fehler beim Laden des Modells {model_id}: {str(e)}", tag="MODEL_LOAD")
             self.model = None
             self.tokenizer = None
+            self.current_model_id = None
             return False
     
     def generate(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, max_retries: int = 2, is_coding: bool = False) -> str:
@@ -830,11 +858,39 @@ class ModelManager:
                 # Bestimme Modell-Typ für spezifische Behandlung
                 is_mistral = "mistral" in self.current_model_id.lower() if self.current_model_id else False
                 
+                # Bestimme ob Qwen-Modell (durch Modell-Namen, nicht Tokenizer-Attribut)
+                is_qwen = self.current_model_id and "qwen" in self.current_model_id.lower()
+                
                 # Für Qwen: Verwende spezielle EOS-Tokens
                 # Für Phi-3: Verwende auch spezielle EOS-Tokens
                 eos_token_id = self.tokenizer.eos_token_id
-                if hasattr(self.tokenizer, 'im_end_id'):  # Qwen-spezifisch
-                    eos_token_id = [self.tokenizer.eos_token_id, self.tokenizer.im_end_id]
+                if is_qwen:
+                    # Qwen: Versuche im_end_id zu finden, sonst verwende nur eos_token_id
+                    # Qwen-2.5 verwendet typischerweise beide Tokens: eos_token_id und im_end_id
+                    try:
+                        # Versuche im_end_id über Tokenizer zu finden
+                        if hasattr(self.tokenizer, 'im_end_id'):
+                            im_end_id = self.tokenizer.im_end_id
+                            eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
+                            logger.debug(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id}")
+                        else:
+                            # Fallback: Versuche über convert_tokens_to_ids
+                            im_end_token = "<|im_end|>"
+                            if hasattr(self.tokenizer, 'convert_tokens_to_ids'):
+                                im_end_id = self.tokenizer.convert_tokens_to_ids(im_end_token)
+                                if im_end_id is not None and im_end_id != self.tokenizer.unk_token_id:
+                                    eos_token_id = [self.tokenizer.eos_token_id, im_end_id]
+                                    logger.debug(f"[Qwen] Verwende EOS-Token-Liste (via convert_tokens_to_ids): {eos_token_id}")
+                                else:
+                                    # Nur eos_token_id verwenden
+                                    eos_token_id = [self.tokenizer.eos_token_id]
+                                    logger.model_gen(f"[Qwen] Verwende nur eos_token_id (im_end_id nicht gefunden): {eos_token_id}", level="debug")
+                            else:
+                                eos_token_id = [self.tokenizer.eos_token_id]
+                                logger.model_gen(f"[Qwen] Verwende nur eos_token_id: {eos_token_id}", level="debug")
+                    except Exception as e:
+                        logger.warning(f"[Qwen] Fehler beim Bestimmen von EOS-Tokens: {e}, verwende nur eos_token_id", tag="MODEL_GEN")
+                        eos_token_id = [self.tokenizer.eos_token_id]
                 elif self.current_model_id and "phi-3" in self.current_model_id.lower():
                     # Phi-3 verwendet <|endoftext|> als EOS
                     eos_token_id = self.tokenizer.eos_token_id
@@ -849,15 +905,14 @@ class ModelManager:
                         except:
                             pass
                 
-                repetition_penalty = 1.3 if is_mistral else 1.2
+                repetition_penalty = 1.1 if is_coding else (1.3 if is_mistral else 1.2)
                 
                 # Für Qwen: Liste beibehalten (model.generate() unterstützt Listen)
                 # Für andere Modelle: Single Integer verwenden
-                is_qwen = hasattr(self.tokenizer, 'im_end_id')
                 if is_qwen:
                     # Qwen: Verwende Liste mit beiden EOS-Tokens
                     eos_token_id_for_generate = eos_token_id  # Bleibt Liste
-                    logger.debug(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id_for_generate}")
+                    logger.debug(f"[Qwen] Verwende EOS-Token-Liste für generate(): {eos_token_id_for_generate}")
                 else:
                     # Andere Modelle: Single Integer
                     eos_token_id_for_generate = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
@@ -878,7 +933,7 @@ class ModelManager:
                     # early_stopping entfernt - invalid für sampling mode
                 )
                 
-                logger.debug(f"[DEBUG] AFTER model.generate() - outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}")
+                logger.model_gen(f"AFTER generate(): outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}", level="debug")
                 logger.debug(f"[DEBUG] Generierung abgeschlossen, starte Decoding...")
             
             # Decode - nur die neuen Tokens (ohne Input)
@@ -915,14 +970,14 @@ class ModelManager:
                 
                 response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
-                logger.debug(f"[DEBUG] Decoding abgeschlossen, Länge: {len(response)} Zeichen")
+                logger.model_gen(f"Decoding abgeschlossen, Länge: {len(response)} Zeichen", level="debug")
                 
                 # 🔧 NEUE MINIMALISTISCHE BEREINIGUNG
-                logger.debug(f"[DEBUG] Vor Cleaning: {len(response)} Zeichen")
+                logger.model_gen(f"Vor Cleaning: {len(response)} Zeichen", level="debug")
                 response = self._clean_response_minimal(response, messages, original_prompt)
-                logger.debug(f"[DEBUG] Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...")
+                logger.model_gen(f"Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...", level="debug")
             
-            logger.debug(f"[DEBUG] Response fertig, finale Länge: {len(response)} Zeichen")
+                logger.model_gen(f"Response fertig, finale Länge: {len(response)} Zeichen", level="debug")
             return response
         
         except Exception as e:
@@ -1024,8 +1079,15 @@ class ModelManager:
             
             repetition_penalty = 1.3 if is_mistral else 1.2
             
-            # FIX: eos_token_id muss single integer sein, nicht Liste
-            eos_token_id_single = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+            # Für Qwen: Liste beibehalten (model.generate() unterstützt Listen)
+            # Für andere Modelle: Single Integer verwenden
+            if is_qwen:
+                # Qwen: Verwende Liste mit beiden EOS-Tokens
+                eos_token_id_for_stream = eos_token_id  # Bleibt Liste
+                logger.debug(f"[Qwen] Streaming: Verwende EOS-Token-Liste: {eos_token_id_for_stream}")
+            else:
+                # Andere Modelle: Single Integer
+                eos_token_id_for_stream = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
             
             # Erstelle Streamer
             streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -1040,7 +1102,7 @@ class ModelManager:
                 "top_k": 50 if temperature > 0 and is_mistral else None,
                 "repetition_penalty": repetition_penalty,
                 "pad_token_id": self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                "eos_token_id": eos_token_id_single,
+                "eos_token_id": eos_token_id_for_stream,
                 "no_repeat_ngram_size": 3,
                 # early_stopping entfernt - invalid für sampling mode
                 "streamer": streamer

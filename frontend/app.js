@@ -1057,14 +1057,15 @@ async function sendMessage() {
         let retries = 0;
         const maxRetries = 3;
         
+        // FIX: Streaming temporär deaktiviert - verwende normale Methode
         // Streaming IMMER aktivieren für Satz-für-Satz Anzeige
-        try {
-            await sendMessageStream(fullMessage, conversationIdAtStart, loadingId);
-            return; // Streaming beendet, keine weitere Verarbeitung nötig
-        } catch (error) {
-            // Bei Fehler, fallback auf normale Methode
-            console.warn('Streaming fehlgeschlagen, verwende normale Methode:', error);
-        }
+        // try {
+        //     await sendMessageStream(fullMessage, conversationIdAtStart, loadingId);
+        //     return; // Streaming beendet, keine weitere Verarbeitung nötig
+        // } catch (error) {
+        //     // Bei Fehler, fallback auf normale Methode
+        //     console.warn('Streaming fehlgeschlagen, verwende normale Methode:', error);
+        // }
         
         while (retries < maxRetries) {
             try {
@@ -1126,6 +1127,18 @@ async function sendMessage() {
         if (loadingMsg) {
             loadingMsg.remove();
         }
+        
+        // Debug: Prüfe Response-Format
+        console.log('Response received:', response);
+        console.log('Response.response:', response.response);
+        console.log('Response type:', typeof response);
+        
+        if (!response || !response.response) {
+            console.error('Response ist leer oder hat kein response-Feld!', response);
+            addMessageToChat('assistant', 'Fehler: Keine Antwort erhalten');
+            return;
+        }
+        
         addMessageToChat('assistant', response.response);
         
         // Update title if first message
