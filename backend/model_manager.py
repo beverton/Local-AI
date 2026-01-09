@@ -182,16 +182,25 @@ class ModelManager:
             
             logger.info(f"Lade Modell: {model_id} von {model_path}")
             
-            # Prüfe Performance-Settings für Flash Attention 2
+            # Performance-Settings nur einmal laden
             perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
-            use_flash_attention = True  # Default
+            perf_settings: Dict[str, Any] = {}
             if os.path.exists(perf_settings_path):
                 try:
                     with open(perf_settings_path, 'r', encoding='utf-8') as f:
                         perf_settings = json.load(f)
-                        use_flash_attention = perf_settings.get("use_flash_attention", True)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Fehler beim Laden der Performance-Settings: {e}")
+            
+            # Modell-spezifische Lade-Overrides (optional)
+            model_loading_cfg = model_info.get("loading", {}) if isinstance(model_info, dict) else {}
+            has_model_specific = bool(model_loading_cfg)
+            
+            # Flash Attention Einstellung (global → modell-spezifisch)
+            use_flash_attention = model_loading_cfg.get(
+                "use_flash_attention",
+                perf_settings.get("use_flash_attention", True)
+            )
             
             # Prüfe ob Flash Attention 2 verfügbar ist
             flash_attention_available = False
@@ -209,26 +218,124 @@ class ModelManager:
                 trust_remote_code=True
             )
             
-            # Prüfe Performance-Settings für Quantisierung
-            use_quantization = False
-            quantization_bits = 8
-            try:
-                perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
-                if os.path.exists(perf_settings_path):
-                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
-                        perf_settings = json.load(f)
-                        use_quantization = perf_settings.get("use_quantization", False)
-                        quantization_bits = perf_settings.get("quantization_bits", 8)
-            except:
-                pass
+            # Performance-Settings für Quantisierung (global → modell-spezifisch)
+            use_quantization = model_loading_cfg.get(
+                "use_quantization",
+                perf_settings.get("use_quantization", False)
+            )
+            quantization_bits = model_loading_cfg.get(
+                "quantization_bits",
+                perf_settings.get("quantization_bits", 8)
+            )
+            
+            # CPU-Offloading Einstellung (global → modell-spezifisch)
+            disable_cpu_offload = model_loading_cfg.get(
+                "disable_cpu_offload",
+                perf_settings.get("disable_cpu_offload", False)
+            )
             
             # Modell laden
             # FIX: Verwende float16 statt bfloat16 - bfloat16 mit device_map="auto" führt zu "meta" device state
+            # FIX: Wenn disable_cpu_offload aktiv, verwende device_map="cuda" statt "auto" um CPU-Offloading zu verhindern
+            max_memory = None
+            
+            # Erlaubt modell-spezifische Vorgaben
+            custom_device_map = model_loading_cfg.get("device_map")
+            
+            # Torch dtype (modell-spezifisch → fallback)
+            torch_dtype_str = model_loading_cfg.get("torch_dtype")
+            if torch_dtype_str == "float16":
+                torch_dtype = torch.float16
+            elif torch_dtype_str == "bfloat16":
+                torch_dtype = torch.bfloat16
+            else:
+                torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+            
+            # Prüfe verfügbaren GPU-Speicher (wenn CUDA verfügbar)
+            available_gpu_memory_gb = None
+            total_memory = None
+            if self.device == "cuda":
+                import torch.cuda as cuda
+                try:
+                    # Gesamter GPU-Speicher
+                    total_memory = cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+                    # Bereits belegter Speicher
+                    allocated_memory = cuda.memory_allocated(0) / (1024**3)  # GB
+                    # Reservierter Speicher (PyTorch reserviert mehr als tatsächlich genutzt)
+                    reserved_memory = cuda.memory_reserved(0) / (1024**3)  # GB
+                    # Verfügbarer Speicher (konservativ: nutze reserviert als Basis)
+                    available_gpu_memory_gb = total_memory - reserved_memory
+                    logger.info(f"GPU-Speicher: {total_memory:.1f}GB total, {reserved_memory:.1f}GB reserviert, {available_gpu_memory_gb:.1f}GB verfügbar")
+                except Exception as e:
+                    logger.warning(f"Fehler beim Prüfen des GPU-Speichers: {e}")
+                    # Fallback: Verwende total_memory wenn verfügbar
+                    if total_memory is None:
+                        try:
+                            total_memory = cuda.get_device_properties(0).total_memory / (1024**3)
+                        except:
+                            pass
+            
+            if custom_device_map is not None:
+                device_map = custom_device_map
+                # Wenn device_map="cuda" explizit gesetzt, aber nicht genug Speicher: Warnung und Fallback
+                if device_map == "cuda" and available_gpu_memory_gb is not None and available_gpu_memory_gb < 8.0:
+                    logger.warning(
+                        f"device_map='cuda' gesetzt, aber nur {available_gpu_memory_gb:.1f}GB verfügbar. "
+                        f"Falle zurück auf device_map='auto' mit max_memory um OOM zu vermeiden."
+                    )
+                    device_map = "auto"
+                    max_memory_gb = int(available_gpu_memory_gb * 0.9)  # 90% des verfügbaren Speichers
+                    max_memory = {0: f"{max_memory_gb}GB"}
+            else:
+                if self.device == "cuda":
+                    if use_quantization:
+                        # Bei Quantisierung muss device_map="auto" sein, aber wir können max_memory setzen
+                        device_map = "auto"
+                        if disable_cpu_offload:
+                            max_memory_gb = int(available_gpu_memory_gb * 0.9) if available_gpu_memory_gb else int(total_memory * 0.9)
+                            max_memory = {0: f"{max_memory_gb}GB"}
+                            logger.info(f"CPU-Offloading deaktiviert - max_memory auf GPU: {max_memory_gb}GB")
+                        else:
+                            logger.info("Quantisierung aktiviert - device_map='auto' mit CPU-Offloading erlaubt")
+                    elif disable_cpu_offload:
+                        # Verhindere CPU/Disk-Offloading - prüfe ob genug Speicher für device_map="cuda"
+                        if available_gpu_memory_gb is not None and available_gpu_memory_gb >= 8.0:
+                            # Genug Speicher: verwende device_map="cuda"
+                            device_map = "cuda"
+                            logger.info(f"CPU-Offloading deaktiviert - lade Modell vollständig auf GPU (device_map='cuda', {available_gpu_memory_gb:.1f}GB verfügbar)")
+                        else:
+                            # Nicht genug Speicher: verwende device_map="auto" mit max_memory
+                            device_map = "auto"
+                            max_memory_gb = int(available_gpu_memory_gb * 0.9) if available_gpu_memory_gb else int(total_memory * 0.9)
+                            max_memory = {0: f"{max_memory_gb}GB"}
+                            logger.info(
+                                f"CPU-Offloading deaktiviert, aber nur {available_gpu_memory_gb:.1f}GB verfügbar. "
+                                f"Verwende device_map='auto' mit max_memory={max_memory_gb}GB um OOM zu vermeiden."
+                            )
+                    else:
+                        # Erlaube CPU-Offloading wenn nötig
+                        device_map = "auto"
+                        logger.info("CPU-Offloading erlaubt - device_map='auto'")
+                else:
+                    device_map = None
+            
+            # Zusammenfassung der Lade-Parameter loggen
+            logger.info(
+                f"Model-Loading Config -> model_id={model_id}, device_map={device_map}, "
+                f"disable_cpu_offload={disable_cpu_offload}, use_quantization={use_quantization}, "
+                f"quantization_bits={quantization_bits}, model_specific={has_model_specific}"
+            )
+            
             model_kwargs = {
-                "torch_dtype": torch.float16 if self.device == "cuda" else torch.float32,
-                "device_map": "auto" if self.device == "cuda" else None,
-                "trust_remote_code": True
+                "torch_dtype": torch_dtype,
+                "device_map": device_map,
+                "trust_remote_code": True,
+                "low_cpu_mem_usage": True  # Reduziert CPU-Speicher während des Ladens
             }
+            
+            # Füge max_memory hinzu wenn gesetzt
+            if max_memory is not None:
+                model_kwargs["max_memory"] = max_memory
             
             # Quantisierung (8-bit/4-bit) mit bitsandbytes
             if use_quantization and self.device == "cuda":
@@ -279,13 +386,6 @@ class ModelManager:
                 **model_kwargs
             )
             
-            # #region agent log
-            import json as json_log; log_data = {"location": "model_manager.py:279", "message": "Model loaded - checking device state", "data": {"has_device_attr": hasattr(self.model, 'device'), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') else None, "self_device": str(self.device), "model_dtype": str(self.model.dtype) if hasattr(self.model, 'dtype') else None}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A"}; 
-            try:
-                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log.dumps(log_data) + '\n')
-            except: pass
-            # #endregion
-            
             if self.device == "cpu":
                 self.model = self.model.to(self.device)
             elif self.device == "cuda" and hasattr(self.model, 'hf_device_map'):
@@ -306,13 +406,6 @@ class ModelManager:
                     raise RuntimeError(error_msg)
                 
                 logger.info("✓ Alle Module erfolgreich auf GPU geladen (kein 'meta' device)")
-            
-            # #region agent log
-            import json as json_log2; log_data2 = {"location": "model_manager.py:309", "message": "After device assignment and validation", "data": {"cpu_branch_taken": self.device == "cpu", "model_device": str(self.model.device) if hasattr(self.model, 'device') else "no device attr", "first_param_device": str(next(self.model.parameters()).device) if self.model else "no model"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A,D"}; 
-            try:
-                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log2.dumps(log_data2) + '\n')
-            except: pass
-            # #endregion
             
             # Prüfe Performance-Settings für torch.compile()
             use_torch_compile = False
@@ -645,12 +738,6 @@ class ModelManager:
         Returns:
             Die generierte Antwort
         """
-        # #region agent log
-        import json as json_log_gen; log_data_gen = {"location": "model_manager.py:616", "message": "Generate entry - model state", "data": {"model_loaded": self.model is not None, "current_model_id": self.current_model_id, "has_device": hasattr(self.model, 'device') if self.model else False, "has_hf_device_map": hasattr(self.model, 'hf_device_map') if self.model else False, "hf_device_map_len": len(self.model.hf_device_map) if (self.model and hasattr(self.model, 'hf_device_map') and self.model.hf_device_map) else 0}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "B,E"}; 
-        try:
-            with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_gen.dumps(log_data_gen) + '\n')
-        except: pass
-        # #endregion
         try:
             ## Verwende Chat-Template wenn verfügbar (für Qwen, Phi-3, etc.)
             if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
@@ -682,66 +769,40 @@ class ModelManager:
             # Tokenize
             inputs = self.tokenizer(prompt, return_tensors="pt")
             
-            # #region agent log
-            import json as json_log3; log_data3 = {"location": "model_manager.py:656", "message": "Before input device transfer", "data": {"has_device": hasattr(self.model, 'device'), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') and self.model.hf_device_map else None, "self_device": str(self.device), "input_device_before": str(inputs['input_ids'].device)}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "C,D"}; 
-            try:
-                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log3.dumps(log_data3) + '\n')
-            except: pass
-            # #endregion
-            
             # Stelle sicher, dass alle Inputs auf dem richtigen Device sind
             # WICHTIG: Wenn device_map="auto" verwendet wird, müssen Inputs auf dem ersten Device sein
             if hasattr(self.model, 'device'):
                 # Modell hat ein device-Attribut (wenn device_map nicht verwendet wird)
                 target_device = self.model.device
                 inputs = {k: v.to(target_device) for k, v in inputs.items()}
-                # #region agent log
-                import json as json_log4; log_data4 = {"location": "model_manager.py:672", "message": "Device branch: model.device", "data": {"target_device": str(target_device), "branch": "model.device"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
-                try:
-                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log4.dumps(log_data4) + '\n')
-                except: pass
-                # #endregion
             elif hasattr(self.model, 'hf_device_map') and self.model.hf_device_map:
                 # Modell verwendet device_map="auto" - Inputs auf erstes Device
                 first_device = list(self.model.hf_device_map.values())[0]
                 target_device = first_device
                 inputs = {k: v.to(target_device) for k, v in inputs.items()}
-                # #region agent log
-                import json as json_log5; log_data5 = {"location": "model_manager.py:683", "message": "Device branch: hf_device_map", "data": {"target_device": str(target_device), "branch": "hf_device_map", "device_map_values": [str(v) for v in self.model.hf_device_map.values()]}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
-                try:
-                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log5.dumps(log_data5) + '\n')
-                except: pass
-                # #endregion
             else:
                 # Fallback: Verwende self.device
                 target_device = self.device
                 inputs = {k: v.to(target_device) for k, v in inputs.items()}
-                # #region agent log
-                import json as json_log6; log_data6 = {"location": "model_manager.py:694", "message": "Device branch: fallback self.device", "data": {"target_device": str(target_device), "branch": "fallback"}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "D"}; 
-                try:
-                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log6.dumps(log_data6) + '\n')
-                except: pass
-                # #endregion
-            
-            # #region agent log
-            import json as json_log7; log_data7 = {"location": "model_manager.py:703", "message": "After input device transfer", "data": {"input_device_after": str(inputs['input_ids'].device), "target_device": str(target_device)}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "C,D"}; 
-            try:
-                with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log7.dumps(log_data7) + '\n')
-            except: pass
-            # #endregion
             
             input_length = inputs['input_ids'].shape[1]
             
             # Modell-spezifische Limits
             model_limits = {
-                "mistral": 4096,  # Mistral hat typischerweise 4096 Token Kontext
-                "phi-3": 8192,    # Phi-3 hat 8192 Token Kontext
-                "default": 2048   # Standard-Limit
+                "mistral": 4096,      # Mistral hat typischerweise 4096 Token Kontext
+                "phi-3": 8192,        # Phi-3 hat 8192 Token Kontext
+                "qwen": 32768,        # Qwen-2.5-7B hat 32k Token Kontext
+                "qwen2": 32768,       # Qwen-2.x hat auch 32k
+                "default": 2048       # Standard-Limit
             }
             
             # Bestimme Modell-Limit
-            model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
-            model_max_context = model_limits.get(model_name, model_limits["default"])
+            # Prüfe zuerst auf "qwen" im gesamten Modell-Namen (nicht nur Prefix)
+            if self.current_model_id and "qwen" in self.current_model_id.lower():
+                model_max_context = model_limits.get("qwen", model_limits["default"])
+            else:
+                model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
+                model_max_context = model_limits.get(model_name, model_limits["default"])
             
             # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
             max_new_tokens = min(
@@ -790,24 +851,18 @@ class ModelManager:
                 
                 repetition_penalty = 1.3 if is_mistral else 1.2
                 
-                # FIX: eos_token_id muss single integer sein, nicht Liste
-                eos_token_id_single = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+                # Für Qwen: Liste beibehalten (model.generate() unterstützt Listen)
+                # Für andere Modelle: Single Integer verwenden
+                is_qwen = hasattr(self.tokenizer, 'im_end_id')
+                if is_qwen:
+                    # Qwen: Verwende Liste mit beiden EOS-Tokens
+                    eos_token_id_for_generate = eos_token_id  # Bleibt Liste
+                    logger.info(f"[Qwen] Verwende EOS-Token-Liste: {eos_token_id_for_generate}")
+                else:
+                    # Andere Modelle: Single Integer
+                    eos_token_id_for_generate = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
                 
-                logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id_single={eos_token_id_single}, max_new_tokens={max_new_tokens}, temperature={temperature}")
-                
-                # #region agent log
-                import json as json_log_gen2; 
-                try:
-                    first_param_device = str(next(self.model.parameters()).device) if self.model else "no model"
-                    model_on_meta = "meta" in first_param_device
-                except: 
-                    first_param_device = "error getting device"
-                    model_on_meta = False
-                log_data_gen2 = {"location": "model_manager.py:757", "message": "Right before model.generate()", "data": {"first_param_device": first_param_device, "model_on_meta": model_on_meta, "input_device": str(inputs['input_ids'].device), "has_hf_device_map": hasattr(self.model, 'hf_device_map'), "hf_device_map": str(self.model.hf_device_map) if hasattr(self.model, 'hf_device_map') and self.model.hf_device_map else None}, "timestamp": time.time() * 1000, "sessionId": "debug-session", "hypothesisId": "A,B,D"}; 
-                try:
-                    with open(r'g:\04-CODING\Local Ai\debug.log', 'a', encoding='utf-8') as f: f.write(json_log_gen2.dumps(log_data_gen2) + '\n')
-                except: pass
-                # #endregion
+                logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id={eos_token_id_for_generate}, max_new_tokens={max_new_tokens}, temperature={temperature}")
                 
                 outputs = self.model.generate(
                     **inputs,
@@ -818,12 +873,13 @@ class ModelManager:
                     top_k=50 if temperature > 0 and is_mistral else None,  # Top-k für Mistral
                     repetition_penalty=repetition_penalty,
                     pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                    eos_token_id=eos_token_id_single,
+                    eos_token_id=eos_token_id_for_generate,  # Kann jetzt Liste oder Integer sein
                     no_repeat_ngram_size=3
                     # early_stopping entfernt - invalid für sampling mode
                 )
                 
                 logger.warning(f"[DEBUG] AFTER model.generate() - outputs.shape={outputs.shape if hasattr(outputs, 'shape') else 'unknown'}")
+                logger.info(f"[DEBUG] Generierung abgeschlossen, starte Decoding...")
             
             # Decode - nur die neuen Tokens (ohne Input)
             input_length = inputs['input_ids'].shape[1]
@@ -859,12 +915,14 @@ class ModelManager:
                 
                 response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
+                logger.info(f"[DEBUG] Decoding abgeschlossen, Länge: {len(response)} Zeichen")
                 
                 # 🔧 NEUE MINIMALISTISCHE BEREINIGUNG
+                logger.info(f"[DEBUG] Vor Cleaning: {len(response)} Zeichen")
                 response = self._clean_response_minimal(response, messages, original_prompt)
-                
-                #logger.info(f"[Generate] Finale Response-Länge: {len(response)} chars, Modell: {self.current_model_id}")
+                logger.info(f"[DEBUG] Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...")
             
+            logger.info(f"[DEBUG] Response fertig, finale Länge: {len(response)} Zeichen")
             return response
         
         except Exception as e:
