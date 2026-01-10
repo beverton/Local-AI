@@ -15,10 +15,36 @@ const btnRestart = document.getElementById('btnRestart');
 document.addEventListener('DOMContentLoaded', () => {
     checkServiceStatus();
     loadModelStatus();
+    loadMCPSettings();
     
     // Restart Button Event Listener
     if (btnRestart) {
         btnRestart.addEventListener('click', restartServer);
+    }
+    
+    // MCP Settings Toggle Event Listener
+    const autoModelSilentModeToggle = document.getElementById('autoModelSilentMode');
+    if (autoModelSilentModeToggle) {
+        autoModelSilentModeToggle.addEventListener('change', async (e) => {
+            await saveMCPSettings(e.target.checked);
+        });
+    }
+    
+    // Max Length Settings werden in loadMCPSettings() geladen (nachdem Settings-Sektion angezeigt wurde)
+    const maxLengthSlider = document.getElementById('maxLengthSlider');
+    const maxLengthValue = document.getElementById('maxLengthValue');
+    const btnSaveMaxLength = document.getElementById('btnSaveMaxLength');
+    
+    if (maxLengthSlider && maxLengthValue) {
+        maxLengthSlider.addEventListener('input', (e) => {
+            maxLengthValue.textContent = parseInt(e.target.value);
+        });
+    }
+    
+    if (btnSaveMaxLength) {
+        btnSaveMaxLength.addEventListener('click', async () => {
+            await saveMaxLengthSettings();
+        });
     }
     
     // Kein automatisches Polling mehr - Status wird nur bei Bedarf aktualisiert
@@ -69,6 +95,138 @@ async function loadModelStatus(preserveSelects = false) {
         
         serviceStatus.className = 'status-indicator disconnected';
         serviceStatusText.textContent = 'Nicht verbunden';
+    }
+}
+
+// Lade MCP Settings
+async function loadMCPSettings() {
+    try {
+        const response = await fetch(`${API_BASE}/mcp/settings`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const settings = await response.json();
+        const toggle = document.getElementById('autoModelSilentMode');
+        const settingsSection = document.getElementById('settingsSection');
+        
+        if (toggle) {
+            toggle.checked = settings.auto_model_silent_mode || false;
+        }
+        
+        if (settingsSection) {
+            settingsSection.style.display = 'block';
+            // Lade max_length Settings nachdem Settings-Sektion angezeigt wurde
+            await loadMaxLengthSettings();
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der MCP-Einstellungen:', error);
+        // Zeige Settings-Sektion trotzdem an (mit Default-Werten)
+        const settingsSection = document.getElementById('settingsSection');
+        if (settingsSection) {
+            settingsSection.style.display = 'block';
+            // Versuche trotzdem max_length Settings zu laden
+            await loadMaxLengthSettings();
+        }
+    }
+}
+
+// Speichere MCP Settings
+// Max Length Settings
+async function loadMaxLengthSettings() {
+    try {
+        const response = await fetch(`${API_BASE}/settings/max-length`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const maxLengthSlider = document.getElementById('maxLengthSlider');
+        const maxLengthValue = document.getElementById('maxLengthValue');
+        
+        if (maxLengthSlider && maxLengthValue) {
+            maxLengthSlider.min = data.min;
+            maxLengthSlider.max = data.max;
+            maxLengthSlider.value = data.max_length;
+            maxLengthValue.textContent = data.max_length;
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der max_length Settings:', error);
+    }
+}
+
+async function saveMaxLengthSettings() {
+    const maxLengthSlider = document.getElementById('maxLengthSlider');
+    if (!maxLengthSlider) {
+        return;
+    }
+    
+    const maxLength = parseInt(maxLengthSlider.value);
+    
+    try {
+        const response = await fetch(`${API_BASE}/settings/max-length`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ max_length: maxLength })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        alert(`Max. Länge erfolgreich auf ${data.max_length} gesetzt!`);
+        
+        // Aktualisiere UI
+        const maxLengthValue = document.getElementById('maxLengthValue');
+        if (maxLengthValue) {
+            maxLengthValue.textContent = data.max_length;
+        }
+    } catch (error) {
+        console.error('Fehler beim Speichern der max_length Settings:', error);
+        alert(`Fehler beim Speichern: ${error.message}`);
+    }
+}
+
+async function saveMCPSettings(autoModelSilentMode) {
+    try {
+        const response = await fetch(`${API_BASE}/mcp/settings`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                auto_model_silent_mode: autoModelSilentMode
+            })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        console.log('MCP-Einstellungen gespeichert:', result);
+        
+        // Zeige Bestätigung
+        const toggle = document.getElementById('autoModelSilentMode');
+        if (toggle) {
+            const status = autoModelSilentMode ? 'aktiviert' : 'deaktiviert';
+            // Kurze visuelle Bestätigung (optional)
+            toggle.style.transition = 'all 0.3s';
+            setTimeout(() => {
+                toggle.style.transition = '';
+            }, 300);
+        }
+    } catch (error) {
+        console.error('Fehler beim Speichern der MCP-Einstellungen:', error);
+        alert(`Fehler beim Speichern: ${error.message}`);
+        
+        // Setze Toggle zurück auf vorherigen Wert
+        await loadMCPSettings();
     }
 }
 

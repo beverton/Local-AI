@@ -9,7 +9,6 @@ let currentImageAbortController = null;
 let uploadedFilesList = []; // Liste der hochgeladenen Dateien
 let settings = {
     temperature: 0.3,  // Niedriger für bessere Qualität (weniger "Jibberish")
-    maxLength: 2048,
     preferenceLearning: false,
     transcriptionLanguage: ""  // Leerer String = Auto-Erkennung
 };
@@ -40,9 +39,7 @@ const btnRestart = document.getElementById('btnRestart');
 const preferenceToggle = document.getElementById('preferenceToggle');
 const btnResetPreferences = document.getElementById('btnResetPreferences');
 const temperatureSlider = document.getElementById('temperatureSlider');
-const maxLengthSlider = document.getElementById('maxLengthSlider');
 const temperatureValue = document.getElementById('temperatureValue');
-const maxLengthValue = document.getElementById('maxLengthValue');
 const cpuPercent = document.getElementById('cpuPercent');
 const ramPercent = document.getElementById('ramPercent');
 const gpuPercent = document.getElementById('gpuPercent');
@@ -246,10 +243,6 @@ function setupEventListeners() {
     temperatureSlider.addEventListener('input', (e) => {
         settings.temperature = parseFloat(e.target.value);
         temperatureValue.textContent = settings.temperature.toFixed(1);
-    });
-    maxLengthSlider.addEventListener('input', (e) => {
-        settings.maxLength = parseInt(e.target.value);
-        maxLengthValue.textContent = settings.maxLength;
     });
     cpuThreadsSlider.addEventListener('input', (e) => {
         const value = parseInt(e.target.value);
@@ -1074,7 +1067,6 @@ async function sendMessage() {
                     body: JSON.stringify({
                         message: fullMessage,
                         conversation_id: conversationIdAtStart,
-                        max_length: settings.maxLength,
                         temperature: settings.temperature
                     }),
                     signal: currentAbortController.signal
@@ -1877,7 +1869,22 @@ function formatMessageContent(text) {
      * - Unterstützt Markdown-Links [text](url)
      * - Erkennt Code-Blöcke (```language ... ```) und macht sie kopierbar
      * - Erhält Zeilenumbrüche
+     * - Unterstützt HTML-Quellen-Header (wird nicht escaped)
      */
+    
+    // FIX: HTML-Quellen-Header extrahieren (bevor HTML escaped wird)
+    const sourcesHeaders = [];
+    let sourcesHeaderIndex = 0;
+    // Pattern: <div style='...'><strong>Quellen:</strong> ... </div>
+    const sourcesHeaderPattern = /<div[^>]*style=['"][^'"]*['"][^>]*><strong>Quellen:<\/strong>[^<]*<\/div>\s*\n*/g;
+    let processedText = text.replace(sourcesHeaderPattern, (match) => {
+        const headerId = `sources-header-${sourcesHeaderIndex++}`;
+        sourcesHeaders.push({
+            id: headerId,
+            html: match.trim()
+        });
+        return `__SOURCES_HEADER_${headerId}__`;
+    });
     
     // Code-Blöcke zuerst extrahieren (bevor HTML escaped wird)
     const codeBlocks = [];
@@ -1886,7 +1893,7 @@ function formatMessageContent(text) {
     // Pattern: ```language\ncode\n``` oder ```language code\n``` oder ```\ncode\n```
     // Unterstützt auch Code-Blöcke ohne Newline nach der Sprache
     const codeBlockPattern = /```(\w+)?\s*\n?([\s\S]*?)```/g;
-    let processedText = text.replace(codeBlockPattern, (match, language, code) => {
+    processedText = processedText.replace(codeBlockPattern, (match, language, code) => {
         const blockId = `code-block-${codeBlockIndex++}`;
         // Entferne führende/trailing Whitespace und Newlines
         const cleanCode = code.trim();
@@ -1898,7 +1905,7 @@ function formatMessageContent(text) {
         return `__CODE_BLOCK_${blockId}__`;
     });
     
-    // Escape HTML (XSS-Schutz) - aber Code-Blöcke sind bereits extrahiert
+    // Escape HTML (XSS-Schutz) - aber Code-Blöcke und Quellen-Header sind bereits extrahiert
     let escaped = escapeHtml(processedText);
     
     // Markdown-Links erkennen und umwandeln: [text](url) (VOR Code-Blöcken einfügen)
@@ -1917,6 +1924,11 @@ function formatMessageContent(text) {
     
     // Zeilenumbrüche in <br> umwandeln (VOR Code-Blöcken einfügen, damit Text richtig formatiert wird)
     escaped = escaped.replace(/\n/g, '<br>');
+    
+    // FIX: Quellen-Header wieder einfügen (VOR Code-Blöcken, damit sie oben stehen)
+    sourcesHeaders.forEach(header => {
+        escaped = escaped.replace(`__SOURCES_HEADER_${header.id}__`, header.html);
+    });
     
     // Code-Blöcke wieder einfügen mit Copy-Button (NACH Zeilenumbrüche-Ersetzung)
     codeBlocks.forEach(block => {
@@ -2522,7 +2534,6 @@ async function sendMessageStream(message, conversationId, loadingId) {
             body: JSON.stringify({
                 message: message,
                 conversation_id: conversationId,
-                max_length: settings.maxLength,
                 temperature: settings.temperature
             }),
             signal: currentAbortController?.signal
@@ -2575,8 +2586,8 @@ async function sendMessageStream(message, conversationId, loadingId) {
         
         let fullResponse = '';
         let tokenCount = 0;
-        // Stelle sicher, dass maxTokens nie 0 ist
-        const maxTokens = Math.max(settings.maxLength || 2048, 512); // Mindestens 512, damit Division funktioniert
+        // max_length wird vom Model Service verwaltet
+        const maxTokens = 2048; // Fallback für Progress-Berechnung
         
         // Erstelle UpdateQueue für DOM-Updates
         const updateQueue = new UpdateQueue();

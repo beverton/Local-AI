@@ -1099,7 +1099,12 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # ==========================================
         # PHASE 2: Post-Processing (Validation + Retry) - auch für ChatAgent
         # ==========================================
-        max_retries = 2 if quality_manager.settings.get("web_validation", False) else 0
+        # FIX: Retries aktivieren wenn EITHER web_validation ODER hallucination_check aktiv ist
+        has_quality_checks = (
+            quality_manager.settings.get("web_validation", False) or 
+            quality_manager.settings.get("hallucination_check", False)
+        )
+        max_retries = 2 if has_quality_checks else 0
         best_response = response
         best_score = 1.0
         
@@ -1115,6 +1120,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     logger.info(f"Hallucination-Check (Versuch {attempt + 1}): {len(hallucination_issues)} Issues gefunden")
             
             # CHECK 2: Web-Validation (Vollständigkeit, Struktur, etc.)
+            # FIX: Web-Validation kann parallel zu Hallucination-Check laufen
             if quality_manager.settings.get("web_validation", False):
                 validation = quality_manager.validate_response(
                     response=response,
@@ -1147,8 +1153,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             else:
                 logger.warning(f"Response hat Issues (Versuch {attempt + 1}): {all_issues}")
                 
-                # Retry nur wenn web_validation aktiv UND Retries übrig
-                if quality_manager.settings.get("web_validation", False) and attempt < max_retries:
+                # FIX: Retry wenn EITHER web_validation ODER hallucination_check aktiv ist UND Retries übrig
+                if has_quality_checks and attempt < max_retries:
                     # Retry mit Feedback - füge Feedback zur Nachricht hinzu
                     feedback = quality_manager.generate_retry_prompt(
                         request.message, response, all_issues
@@ -1160,7 +1166,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     continue  # Prüfe erneut
                 else:
                     # Kein Retry möglich - nutze beste verfügbare Antwort
-                    if best_response != response and quality_manager.settings.get("web_validation", False):
+                    if best_response != response and has_quality_checks:
                         response = best_response
                         logger.info("Nutze beste verfügbare Antwort nach max Retries")
                     break
@@ -1232,6 +1238,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     
     # Prüfe ob Frage Coding-bezogen ist
     is_coding = quality_manager.is_coding_question(request.message)
+    logger.debug(f"[UseCase] Coding Detection: is_coding={is_coding} für Nachricht: '{request.message[:100]}...'")
     
     # Generiere System-Prompt basierend auf Sprache und Modell
     if current_model and "phi-3" in current_model.lower():
@@ -1244,24 +1251,22 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         else:  # Deutsch (de) oder andere
             system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
         system_prompt = preference_learner.get_system_prompt(system_prompt)
-    elif current_model and "qwen" in current_model.lower() and is_coding:
-        # Qwen: Coding-spezifischer Prompt
+    elif current_model and "qwen" in current_model.lower():
+        # Qwen: Hybrid-Prompt (kann chatten UND coden)
         if response_language == "en":
-            system_prompt = """You are an expert coding assistant. When providing code:
-1. Use Markdown code blocks with language tags (```python, ```javascript, etc.)
-2. Include helpful comments explaining key parts
-3. Follow best practices and coding standards
-4. Handle errors appropriately (try/except, error handling)
-5. Write clean, readable, and maintainable code
-6. Explain briefly what the code does if needed"""
+            system_prompt = """You are a helpful AI assistant who can both answer questions and write code.
+- For questions: Answer clearly and directly
+- For code requests: Use Markdown code blocks with language tags (```python, ```javascript, etc.)
+- Only use code blocks when code is requested
+- Include helpful comments in code when appropriate
+- Explain code briefly if needed"""
         else:  # Deutsch (de) oder andere
-            system_prompt = """Du bist ein Experte für Programmierung. Wenn du Code bereitstellst:
-1. Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
-2. Füge hilfreiche Kommentare hinzu, die wichtige Teile erklären
-3. Befolge Best Practices und Coding-Standards
-4. Behandle Fehler angemessen (try/except, Fehlerbehandlung)
-5. Schreibe sauberen, lesbaren und wartbaren Code
-6. Erkläre kurz was der Code macht, falls nötig"""
+            system_prompt = """Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+- Bei Fragen: Antworte klar und direkt
+- Bei Code-Anfragen: Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
+- Verwende Code-Blocks nur wenn Code gefragt ist
+- Füge hilfreiche Kommentare in Code hinzu wenn angemessen
+- Erkläre Code kurz wenn nötig"""
         system_prompt = preference_learner.get_system_prompt(system_prompt)
     else:
         # Andere Modelle: Sprachspezifischer Prompt
@@ -1442,7 +1447,12 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # ==========================================
         # PHASE 2: Post-Processing (Validation + Retry)
         # ==========================================
-        max_retries = 2 if quality_manager.settings.get("web_validation", False) else 0
+        # FIX: Retries aktivieren wenn EITHER web_validation ODER hallucination_check aktiv ist
+        has_quality_checks = (
+            quality_manager.settings.get("web_validation", False) or 
+            quality_manager.settings.get("hallucination_check", False)
+        )
+        max_retries = 2 if has_quality_checks else 0
         best_response = response
         best_score = 1.0
         original_messages = messages.copy()  # Backup für Retries
@@ -1459,6 +1469,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     logger.info(f"Hallucination-Check (Versuch {attempt + 1}): {len(hallucination_issues)} Issues gefunden")
             
             # CHECK 2: Web-Validation (Vollständigkeit, Struktur, etc.)
+            # FIX: Web-Validation kann parallel zu Hallucination-Check laufen
             if quality_manager.settings.get("web_validation", False):
                 validation = quality_manager.validate_response(
                     response=response,
@@ -1492,8 +1503,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             else:
                 logger.warning(f"Response hat Issues (Versuch {attempt + 1}): {all_issues}")
                 
-                # Retry nur wenn web_validation aktiv UND Retries übrig
-                if quality_manager.settings.get("web_validation", False) and attempt < max_retries:
+                # FIX: Retry wenn EITHER web_validation ODER hallucination_check aktiv ist UND Retries übrig
+                if has_quality_checks and attempt < max_retries:
                     # Retry mit Feedback
                     feedback = quality_manager.generate_retry_prompt(
                         request.message, response, all_issues
@@ -1538,7 +1549,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                     continue  # Prüfe erneut
                 else:
                     # Kein Retry möglich - nutze beste verfügbare Antwort
-                    if best_response != response and quality_manager.settings.get("web_validation", False):
+                    if best_response != response and has_quality_checks:
                         response = best_response
                         logger.info("Nutze beste verfügbare Antwort nach max Retries")
                     break

@@ -84,10 +84,22 @@ class QualityManager:
         """
         import re
         coding_patterns = [
+            # Basis Coding-Keywords
             r"\b(schreibe|erstelle|implementiere|programmiere|code|funktion|klasse|def|class|function)\b",
-            r"\.(py|js|ts|java|cpp|c|go|rs|php|rb|swift|kt)\b",
-            r"\b(algorithmus|syntax|debug|fehler|exception|try|catch|import|from)\b",
-            r"\b(api|endpoint|request|response|json|xml|http)\b"
+            # Dateiendungen
+            r"\.(py|js|ts|java|cpp|c|go|rs|php|rb|swift|kt|html|css|vue|jsx|tsx)\b",
+            # Code-Struktur Keywords
+            r"\b(algorithmus|syntax|debug|fehler|exception|try|catch|import|from|modul|datei)\b",
+            # API/Web Keywords
+            r"\b(api|endpoint|request|response|json|xml|http|rest|graphql)\b",
+            # Spiele/Game Keywords
+            r"\b(spiel|game|baue|nachbau|pong|snake|tetris|tictactoe|spiele|spieleentwicklung)\b",
+            # Projekt Keywords
+            r"\b(projekt|app|anwendung|programm|software|application|programmieren)\b",
+            # Framework-spezifisch
+            r"\b(pygame|flask|django|react|vue|angular|express|fastapi|spring|rails)\b",
+            # Code-Struktur erweitert
+            r"\b(klasse|funktion|methode|variable|array|liste|dictionary|objekt|interface)\b"
         ]
         message_lower = message.lower()
         return any(re.search(pattern, message_lower, re.IGNORECASE) for pattern in coding_patterns)

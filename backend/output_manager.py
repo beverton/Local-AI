@@ -305,9 +305,15 @@ class OutputManager:
 # Globale Instanz
 _output_manager = None
 
-def get_output_manager(config_path: str = "config.json") -> OutputManager:
+def get_output_manager(config_path: Optional[str] = None) -> OutputManager:
     """Gibt die globale OutputManager-Instanz zurück"""
     global _output_manager
     if _output_manager is None:
+        # Wenn kein Pfad angegeben, verwende Projekt-Root
+        if config_path is None:
+            # Bestimme Projekt-Root (ein Verzeichnis über backend/)
+            backend_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(backend_dir)
+            config_path = os.path.join(project_root, "config.json")
         _output_manager = OutputManager(config_path)
     return _output_manager

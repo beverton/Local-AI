@@ -1,0 +1,4 @@
+{
+  "auto_model_silent_mode": true,
+  "description": "Wenn 'auto_model_silent_mode' auf true gesetzt ist, antwortet das 'auto' Modell (Cursor AI) nicht, wenn Nachrichten mit 'local:' oder 'chat:' beginnen. Nur das lokale Modell antwortet dann."
+}

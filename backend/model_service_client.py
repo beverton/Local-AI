@@ -207,19 +207,24 @@ class ModelServiceClient:
             logger.error(f"Fehler beim Abrufen des Image-Modell-Status: {e}")
             return None
     
-    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: int = 512, temperature: float = 0.7, language: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: Optional[int] = None, temperature: Optional[float] = None, language: Optional[str] = None, profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Sendet Chat-Request an Model-Service"""
         try:
             payload = {
                 "message": message,
-                "conversation_id": conversation_id,
-                "max_length": max_length,
-                "temperature": temperature
+                "conversation_id": conversation_id
             }
+            # Nur Parameter hinzufügen, wenn sie gesetzt sind (None = Model Service verwendet Settings/Profil)
+            if max_length is not None:
+                payload["max_length"] = max_length
+            if temperature is not None:
+                payload["temperature"] = temperature
             if messages:
                 payload["messages"] = messages
             if language:
                 payload["language"] = language
+            if profile:
+                payload["profile"] = profile
             
             response = requests.post(
                 f"{self.base_url}/chat",

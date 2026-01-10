@@ -66,6 +66,84 @@ try:
 except:
     config = {}
 
+# Performance Settings Path
+PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
+
+def _load_performance_settings() -> Dict[str, Any]:
+    """Lädt Performance-Settings aus JSON-Datei"""
+    try:
+        if os.path.exists(PERFORMANCE_SETTINGS_FILE):
+            with open(PERFORMANCE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                logger.info(f"[SETTINGS] Performance-Settings geladen von {PERFORMANCE_SETTINGS_FILE}: {settings}")
+                return settings
+        else:
+            logger.warning(f"[SETTINGS] Performance-Settings-Datei nicht gefunden: {PERFORMANCE_SETTINGS_FILE}")
+    except Exception as e:
+        logger.error(f"[SETTINGS] Fehler beim Laden der Performance-Settings: {e}", exc_info=True)
+    default_settings = {
+        "cpu_threads": 0,
+        "gpu_optimization": "balanced",
+        "disable_cpu_offload": False,
+        "max_length": 2048  # Default max_length
+    }
+    logger.info(f"[SETTINGS] Verwende Default-Settings: {default_settings}")
+    return default_settings
+
+def _save_performance_settings(settings: Dict[str, Any]):
+    """Speichert Performance-Settings in JSON-Datei"""
+    try:
+        os.makedirs(os.path.dirname(PERFORMANCE_SETTINGS_FILE), exist_ok=True)
+        with open(PERFORMANCE_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+        logger.info(f"Performance-Settings gespeichert: {settings}")
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern der Performance-Settings: {e}")
+        raise
+
+def _calculate_max_length_limits(model_id: Optional[str] = None) -> Dict[str, int]:
+    """Berechnet Min/Max für max_length basierend auf Modell und GPU"""
+    min_length = 100  # Minimum wie gewünscht
+    
+    # Max basierend auf GPU Memory
+    if torch.cuda.is_available():
+        try:
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            # Grobe Schätzung: ~1 Token pro MB GPU Memory für große Modelle
+            # Für 7B Modelle: ~14GB GPU = ~14000 Tokens max
+            # Für 3B Modelle: ~6GB GPU = ~6000 Tokens max
+            if gpu_memory_gb >= 20:
+                max_length = 16384  # Sehr große GPU
+            elif gpu_memory_gb >= 16:
+                max_length = 8192   # Große GPU
+            elif gpu_memory_gb >= 12:
+                max_length = 4096    # Mittlere GPU
+            elif gpu_memory_gb >= 8:
+                max_length = 2048   # Kleine GPU
+            else:
+                max_length = 1024   # Sehr kleine GPU
+        except:
+            max_length = 2048  # Fallback
+    else:
+        max_length = 1024  # CPU-only
+    
+    # Modell-spezifische Anpassungen
+    if model_id:
+        if "qwen" in model_id.lower():
+            # Qwen kann längere Sequenzen handhaben
+            if "7b" in model_id.lower():
+                max_length = min(max_length, 8192)
+            elif "3b" in model_id.lower():
+                max_length = min(max_length, 4096)
+        elif "mistral" in model_id.lower():
+            max_length = min(max_length, 4096)
+    
+    return {
+        "min": min_length,
+        "max": max_length,
+        "default": 2048
+    }
+
 # Helper-Funktion für Temp-Verzeichnis
 def get_temp_directory() -> str:
     """
@@ -214,6 +292,133 @@ loading_status = {
 # Pfad für zuletzt aktivierte Modelle
 LAST_ACTIVE_MODELS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "last_active_models.json")
 
+# Pfad für Verhaltensprofile
+PROFILES_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "profiles.json")
+
+def load_profiles() -> Dict[str, Any]:
+    """Lädt Verhaltensprofile aus profiles.json"""
+    try:
+        if os.path.exists(PROFILES_PATH):
+            with open(PROFILES_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            # Fallback: Standard-Profile
+            return {
+                "profiles": {
+                    "default": {
+                        "name": "Standard",
+                        "description": "Standard-Verhalten",
+                        "parameters": {
+                            "temperature": 0.3,
+                            "max_length": 2048,
+                            "repetition_penalty": 1.15,
+                            "top_p": 0.9,
+                            "top_k": None,
+                            "is_coding": False
+                        },
+                        "system_prompt_modifications": {}
+                    }
+                },
+                "default_profile": "default",
+                "model_specific_profiles": {}
+            }
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der Profile: {e}, verwende Standard-Profile")
+        return {
+            "profiles": {
+                "default": {
+                    "name": "Standard",
+                    "description": "Standard-Verhalten",
+                    "parameters": {
+                        "temperature": 0.3,
+                        "max_length": 2048,
+                        "repetition_penalty": 1.15,
+                        "top_p": 0.9,
+                        "top_k": None,
+                        "is_coding": False
+                    },
+                    "system_prompt_modifications": {}
+                }
+            },
+            "default_profile": "default",
+            "model_specific_profiles": {}
+        }
+
+def get_profile_for_model(model_id: str, profile_name: Optional[str] = None) -> str:
+    """Bestimmt das zu verwendende Profil für ein Modell"""
+    profiles_data = load_profiles()
+    
+    # Wenn Profil explizit angegeben, verwende es
+    if profile_name and profile_name in profiles_data.get("profiles", {}):
+        return profile_name
+    
+    # Prüfe modell-spezifische Profile
+    model_profiles = profiles_data.get("model_specific_profiles", {})
+    if model_id in model_profiles:
+        # Wenn kein Profil angegeben, verwende default für dieses Modell
+        if not profile_name:
+            return model_profiles[model_id].get("default", profiles_data.get("default_profile", "default"))
+        # Wenn Profil angegeben, prüfe ob es für dieses Modell verfügbar ist
+        if profile_name in model_profiles[model_id]:
+            return profile_name
+    
+    # Fallback: Standard-Profil
+    return profile_name or profiles_data.get("default_profile", "default")
+
+def get_profile_parameters(profile_name: str) -> Dict[str, Any]:
+    """Lädt Parameter für ein Profil"""
+    try:
+        profiles_data = load_profiles()
+        profiles = profiles_data.get("profiles", {})
+        
+        if profile_name in profiles:
+            params = profiles[profile_name].get("parameters", {})
+            logger.info(f"[Profile] Parameter für '{profile_name}' geladen: {params}")
+            return params
+        else:
+            # Fallback: Standard-Parameter
+            logger.warning(f"[Profile] Profil '{profile_name}' nicht gefunden, verwende Standard-Parameter")
+            default_params = {
+                "temperature": 0.3,
+                "max_length": 2048,
+                "repetition_penalty": 1.15,
+                "top_p": 0.9,
+                "top_k": None,
+                "is_coding": False
+            }
+            return default_params
+    except Exception as e:
+        logger.error(f"[Profile] Fehler beim Laden der Parameter für '{profile_name}': {e}", exc_info=True)
+        return {
+            "temperature": 0.3,
+            "max_length": 2048,
+            "repetition_penalty": 1.15,
+            "top_p": 0.9,
+            "top_k": None,
+            "is_coding": False
+        }
+
+def get_profile_system_prompt(model_id: str, profile_name: str, language: str = "de") -> Optional[str]:
+    """Lädt modifizierten System-Prompt für ein Profil"""
+    profiles_data = load_profiles()
+    profiles = profiles_data.get("profiles", {})
+    
+    if profile_name in profiles:
+        profile = profiles[profile_name]
+        modifications = profile.get("system_prompt_modifications", {})
+        
+        # Prüfe ob es eine Modifikation für dieses Modell gibt
+        model_key = None
+        if "qwen" in model_id.lower():
+            model_key = "qwen"
+        elif "mistral" in model_id.lower():
+            model_key = "mistral"
+        
+        if model_key and model_key in modifications:
+            return modifications[model_key]
+    
+    return None
+
 def save_last_active_model(model_type: str, model_id: str):
     """Speichert das zuletzt aktivierte Modell"""
     try:
@@ -340,9 +545,10 @@ class ChatRequest(BaseModel):
     message: str
     messages: Optional[List[Dict[str, str]]] = None  # Vollständige Messages-Liste (mit System-Prompt und History)
     conversation_id: Optional[str] = None
-    max_length: int = 2048
-    temperature: float = 0.3  # Default: 0.3 für bessere Qualität (konsistent mit Frontend)
+    max_length: Optional[int] = None  # Wenn None, wird Profil-Parameter verwendet
+    temperature: Optional[float] = None  # Wenn None, wird Profil-Parameter verwendet
     language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en")
+    profile: Optional[str] = None  # Verhaltensprofil: "default", "coding", "creative" (wenn None, wird default verwendet)
 
 
 class TranscribeRequest(BaseModel):
@@ -965,16 +1171,121 @@ async def get_image_model_status():
     }
 
 
-# Chat Endpoint (delegiert an Text-Modell)
+# OpenAI-kompatible Chat Completion API
+class OpenAIChatMessage(BaseModel):
+    role: str
+    content: str
 
-@app.post("/chat")
-async def chat(request: ChatRequest, http_request: Request):
-    """Chat-Request - delegiert an geladenes Text-Modell"""
+class OpenAIChatRequest(BaseModel):
+    model: str
+    messages: List[OpenAIChatMessage]
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = 2048
+    stream: Optional[bool] = False
+
+class OpenAIChatChoice(BaseModel):
+    index: int
+    message: OpenAIChatMessage
+    finish_reason: str
+
+class OpenAIChatUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+class OpenAIChatResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[OpenAIChatChoice]
+    usage: OpenAIChatUsage
+
+@app.get("/v1/models")
+async def openai_list_models():
+    """
+    OpenAI-kompatibler Models-Endpoint.
+    Viele Clients (inkl. Cursor) prüfen/verifizieren eine OpenAI-Base-URL über GET /v1/models.
+    """
+    model_id = model_manager.get_current_model() or "local-ai"
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "local-ai"
+            }
+        ]
+    }
+
+@app.post("/v1/chat/completions", response_model=OpenAIChatResponse)
+async def openai_chat_completions(request: OpenAIChatRequest, http_request: Request):
+    """OpenAI-kompatibler Chat Completion Endpoint für Cursor Integration"""
     if not model_manager.is_model_loaded():
         raise HTTPException(status_code=400, detail="Kein Text-Modell geladen")
     
     client_id, app_name = get_client_info(http_request)
     model_id = model_manager.get_current_model()
+    
+    # Registriere Client
+    register_client("text", model_id, client_id, app_name or "Cursor")
+    
+    try:
+        # Konvertiere OpenAI Messages zu unserem Format
+        messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+        
+        # Generiere Antwort über Model Manager
+        response_text = model_manager.generate(
+            messages=messages,
+            max_length=request.max_tokens or 2048,
+            temperature=request.temperature or 0.7
+        )
+        
+        if not response_text:
+            raise HTTPException(status_code=500, detail="Keine Antwort vom Modell")
+        
+        # OpenAI-kompatible Response erstellen
+        import time
+        completion_id = f"chatcmpl-{int(time.time())}"
+        
+        return OpenAIChatResponse(
+            id=completion_id,
+            created=int(time.time()),
+            model=model_id or "local-ai",
+            choices=[
+                OpenAIChatChoice(
+                    index=0,
+                    message=OpenAIChatMessage(role="assistant", content=response_text),
+                    finish_reason="stop"
+                )
+            ],
+            usage=OpenAIChatUsage(
+                prompt_tokens=sum(len(m["content"].split()) for m in messages),
+                completion_tokens=len(response_text.split()),
+                total_tokens=sum(len(m["content"].split()) for m in messages) + len(response_text.split())
+            )
+        )
+    
+    except Exception as e:
+        logger.error(f"Fehler bei OpenAI Chat Completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Chat Endpoint (delegiert an Text-Modell)
+
+@app.post("/chat")
+async def chat(request: ChatRequest, http_request: Request):
+    """Chat-Request - delegiert an geladenes Text-Modell"""
+    logger.info(f"[CHAT] Chat-Request erhalten: message='{request.message[:50] if request.message else 'None'}...', messages={len(request.messages) if request.messages else 0}, profile={request.profile}, client={get_client_info(http_request)}")
+    if not model_manager.is_model_loaded():
+        logger.error("[CHAT] Kein Text-Modell geladen")
+        raise HTTPException(status_code=400, detail="Kein Text-Modell geladen")
+    
+    client_id, app_name = get_client_info(http_request)
+    model_id = model_manager.get_current_model()
+    logger.info(f"[CHAT] Modell: {model_id}, Client: {client_id}, App: {app_name}")
     
     # Registriere Client
     register_client("text", model_id, client_id, app_name)
@@ -986,6 +1297,43 @@ async def chat(request: ChatRequest, http_request: Request):
             messages = request.messages
         else:
             messages = [{"role": "user", "content": request.message}]
+        logger.info(f"[CHAT] Verarbeite {len(messages)} Messages")
+        
+        # Bestimme Profil - FORCE DEFAULT für Debugging
+        # Temporär: Immer "default" verwenden, um Probleme zu isolieren
+        if request.profile is None:
+            profile_name = "default"
+            logger.info(f"[CHAT] Kein Profil angegeben, verwende 'default'")
+        else:
+            profile_name = get_profile_for_model(model_id, request.profile)
+            logger.info(f"[CHAT] Profil angegeben: '{request.profile}' -> verwendet: '{profile_name}'")
+        
+        profile_params = get_profile_parameters(profile_name)
+        logger.info(f"[CHAT] Profil-Parameter geladen: {profile_params}")
+        
+        # Verwende Profil-Parameter, wenn nicht explizit angegeben
+        effective_temperature = request.temperature if request.temperature is not None else profile_params.get("temperature", 0.3)
+        
+        # max_length: Request > Persistent Setting > Profil > Default
+        # WICHTIG: Persistent Setting hat Priorität über Profil, da User es explizit gesetzt hat
+        if request.max_length is not None:
+            effective_max_length = request.max_length
+            logger.info(f"[CHAT] max_length aus Request: {effective_max_length}")
+        else:
+            # Verwende persistent gespeicherte max_length Setting (hat Priorität über Profil)
+            perf_settings = _load_performance_settings()
+            # WICHTIG: Prüfe explizit ob max_length in Settings existiert (kann auch 0 sein, was falsch wäre)
+            if "max_length" in perf_settings and perf_settings["max_length"] is not None:
+                effective_max_length = perf_settings["max_length"]
+                logger.info(f"[CHAT] max_length aus Performance Settings: {effective_max_length} (Profil hätte: {profile_params.get('max_length', 2048)})")
+            else:
+                # Falls nicht gesetzt, verwende Profil oder Default
+                effective_max_length = profile_params.get("max_length", 2048)
+                logger.info(f"[CHAT] max_length nicht in Performance Settings, verwende Profil/Default: {effective_max_length}")
+        
+        is_coding = profile_params.get("is_coding", False)
+        
+        logger.info(f"[CHAT] Finale Parameter: temperature={effective_temperature}, max_length={effective_max_length}, is_coding={is_coding}")
         
         # Stelle sicher, dass System-Prompt vorhanden ist (wenn nicht bereits in messages)
         has_system = any(m.get("role") == "system" for m in messages)
@@ -993,12 +1341,35 @@ async def chat(request: ChatRequest, http_request: Request):
             # Bestimme Antwort-Sprache
             response_language = request.language or "de"  # Default: Deutsch
             
-            # Generiere System-Prompt basierend auf Sprache und Modell
-            if "mistral" in model_id.lower():
+            # Prüfe ob Profil einen modifizierten System-Prompt hat
+            profile_system_prompt = get_profile_system_prompt(model_id, profile_name, response_language)
+            
+            if profile_system_prompt:
+                # Verwende Profil-spezifischen System-Prompt
+                system_prompt = profile_system_prompt
+            elif "mistral" in model_id.lower():
                 if response_language == "en":
                     system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words. Answer ONLY the asked question, no additional explanations or technical details."
                 else:  # Deutsch (de) oder andere
                     system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
+            elif "qwen" in model_id.lower():
+                # Qwen: Hybrid-Prompt (kann chatten UND coden)
+                if response_language == "en":
+                    system_prompt = """You are a helpful AI assistant who can both answer questions and write code.
+- For questions: Answer clearly and directly
+- For code requests: Use Markdown code blocks with language tags (```python, ```javascript, etc.)
+- Only use code blocks when code is requested
+- Include helpful comments in code when appropriate
+- Explain code briefly if needed
+IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."""
+                else:  # Deutsch (de) oder andere
+                    system_prompt = """Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+- Bei Fragen: Antworte klar und direkt
+- Bei Code-Anfragen: Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
+- Verwende Code-Blocks nur wenn Code gefragt ist
+- Füge hilfreiche Kommentare in Code hinzu wenn angemessen
+- Erkläre Code kurz wenn nötig
+WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."""
             else:
                 if response_language == "en":
                     system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English. IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."
@@ -1028,8 +1399,9 @@ async def chat(request: ChatRequest, http_request: Request):
                     executor,
                     lambda: model_manager.generate(
                         messages,
-                        max_length=request.max_length,
-                        temperature=request.temperature if request.temperature > 0 else 0.3
+                        max_length=effective_max_length,
+                        temperature=effective_temperature,
+                        is_coding=is_coding
                     )
                 )
                 # Warte mit Timeout
@@ -1081,7 +1453,7 @@ async def chat(request: ChatRequest, http_request: Request):
             raise HTTPException(status_code=500, detail="Modell hat keine Antwort generiert (leere Response)")
         
         # DEBUG: Logge Response vor Rückgabe
-        logger.debug(f"[DEBUG] Sende Response zurück: Länge={len(response_text)} Zeichen, Vorschau: {response_text[:100]}...")
+        logger.info(f"[CHAT] Response generiert: Länge={len(response_text)} Zeichen, Vorschau: {response_text[:100]}...")
         
         response_dict = {
             "response": response_text,
@@ -1089,7 +1461,7 @@ async def chat(request: ChatRequest, http_request: Request):
             "conversation_id": request.conversation_id
         }
         
-        logger.debug(f"[DEBUG] Response-Dict erstellt: response={len(response_text)} chars, model_id={model_id}, conversation_id={request.conversation_id}")
+        logger.info(f"[CHAT] Response-Dict erstellt: response={len(response_text)} chars, model_id={model_id}, conversation_id={request.conversation_id}")
         
         return response_dict
     except HTTPException:
@@ -1356,6 +1728,142 @@ async def lifespan(app: FastAPI):
 # FastAPI/Starlette erlaubt es, lifespan nachträglich zu setzen über router
 app.router.lifespan_context = lifespan
 
+
+# MCP Settings Endpoints
+MCP_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "mcp_settings.json")
+
+class MCPSettingsRequest(BaseModel):
+    auto_model_silent_mode: bool
+
+class MCPSettingsResponse(BaseModel):
+    auto_model_silent_mode: bool
+
+class MaxLengthSettingsRequest(BaseModel):
+    max_length: int
+
+class MaxLengthSettingsResponse(BaseModel):
+    max_length: int
+    min: int
+    max: int
+    default: int
+    description: Optional[str] = None
+
+def _load_mcp_settings() -> Dict[str, Any]:
+    """Lädt MCP-Einstellungen"""
+    default_settings = {
+        "auto_model_silent_mode": True,
+        "description": "Wenn 'auto_model_silent_mode' auf true gesetzt ist, antwortet das 'auto' Modell (Cursor AI) nicht, wenn Nachrichten mit 'local:' oder 'chat:' beginnen. Nur das lokale Modell antwortet dann."
+    }
+    
+    try:
+        if os.path.exists(MCP_SETTINGS_FILE):
+            with open(MCP_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                # Merge mit Defaults (für neue Optionen)
+                default_settings.update(loaded)
+                return default_settings
+    except Exception as e:
+        logger.warning(f"Fehler beim Laden der MCP-Einstellungen: {e}")
+    
+    return default_settings
+
+def _save_mcp_settings(settings: Dict[str, Any]):
+    """Speichert MCP-Einstellungen"""
+    try:
+        os.makedirs(os.path.dirname(MCP_SETTINGS_FILE), exist_ok=True)
+        with open(MCP_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern der MCP-Einstellungen: {e}")
+
+@app.get("/mcp/settings", response_model=MCPSettingsResponse)
+async def get_mcp_settings():
+    """Gibt die aktuellen MCP-Einstellungen zurück"""
+    settings = _load_mcp_settings()
+    return MCPSettingsResponse(**settings)
+
+@app.post("/mcp/settings", response_model=MCPSettingsResponse)
+async def set_mcp_settings(request: MCPSettingsRequest):
+    """Setzt MCP-Einstellungen"""
+    current_settings = _load_mcp_settings()
+    current_settings["auto_model_silent_mode"] = request.auto_model_silent_mode
+    _save_mcp_settings(current_settings)
+    return MCPSettingsResponse(**current_settings)
+
+
+# Profile Management Endpoints
+@app.get("/profiles")
+async def get_profiles():
+    """Gibt alle verfügbaren Verhaltensprofile zurück"""
+    profiles_data = load_profiles()
+    return {
+        "profiles": profiles_data.get("profiles", {}),
+        "default_profile": profiles_data.get("default_profile", "default"),
+        "model_specific_profiles": profiles_data.get("model_specific_profiles", {})
+    }
+
+@app.get("/profiles/{profile_name}")
+async def get_profile(profile_name: str):
+    """Gibt ein spezifisches Profil zurück"""
+    profiles_data = load_profiles()
+    profiles = profiles_data.get("profiles", {})
+    
+    if profile_name in profiles:
+        return profiles[profile_name]
+    else:
+        raise HTTPException(status_code=404, detail=f"Profil '{profile_name}' nicht gefunden")
+    logger.info(f"MCP-Einstellungen gespeichert: auto_model_silent_mode={request.auto_model_silent_mode}")
+    return MCPSettingsResponse(**current_settings)
+
+# Max Length Settings Endpoints
+@app.get("/settings/max-length")
+async def get_max_length_settings():
+    """Gibt aktuelle max_length Settings und Limits zurück"""
+    settings = _load_performance_settings()
+    current_max_length = settings.get("max_length", 2048)
+    model_id = model_manager.get_current_model()
+    limits = _calculate_max_length_limits(model_id)
+    
+    return MaxLengthSettingsResponse(
+        max_length=current_max_length,
+        min=limits["min"],
+        max=limits["max"],
+        default=limits["default"]
+    )
+
+@app.put("/settings/max-length")
+async def set_max_length_settings(request: MaxLengthSettingsRequest):
+    """Setzt max_length Setting (persistent)"""
+    model_id = model_manager.get_current_model()
+    limits = _calculate_max_length_limits(model_id)
+    
+    # Validiere max_length
+    if request.max_length < limits["min"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_length muss mindestens {limits['min']} sein"
+        )
+    if request.max_length > limits["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_length darf maximal {limits['max']} sein (basierend auf GPU: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f}GB)"
+        )
+    
+    # Lade aktuelle Settings
+    settings = _load_performance_settings()
+    settings["max_length"] = request.max_length
+    
+    # Speichere persistent
+    _save_performance_settings(settings)
+    
+    logger.info(f"max_length Setting gespeichert: {request.max_length} (Min: {limits['min']}, Max: {limits['max']})")
+    
+    return MaxLengthSettingsResponse(
+        max_length=request.max_length,
+        min=limits["min"],
+        max=limits["max"],
+        default=limits["default"]
+    )
 
 # Restart Endpoint
 @app.post("/restart")

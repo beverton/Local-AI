@@ -20,6 +20,38 @@
         <div class="main-content" id="mainContent">
             <div class="loading">Lade Modell-Status...</div>
         </div>
+        
+        <div class="settings-section" id="settingsSection" style="display: none;">
+            <h2>⚙️ MCP Einstellungen</h2>
+            <div class="settings-card">
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <label for="autoModelSilentMode" class="setting-label">
+                            Auto Model Silent Mode
+                        </label>
+                        <p class="setting-description">
+                            Wenn aktiviert, antwortet das "auto" Modell (Cursor AI) nicht, wenn Nachrichten mit "local:" oder "chat:" beginnen. Nur das lokale Modell antwortet dann.
+                        </p>
+                    </div>
+                    <div class="setting-control">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="autoModelSilentMode" />
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            
+            <h2>⚙️ Generierungs-Einstellungen</h2>
+            <div class="settings-card">
+                <div class="setting-item">
+                    <label for="maxLengthSlider">Aktuelle Länge: <span id="maxLengthValue">2048</span></label>
+                    <input type="range" id="maxLengthSlider" min="100" max="16384" step="100" value="2048">
+                    <p class="setting-description">Maximale Länge der Antworten</p>
+                </div>
+                <button class="btn-save-max-length" id="btnSaveMaxLength">💾 Max. Länge speichern</button>
+            </div>
+        </div>
     </div>
     
     <script src="/static/app.js"></script>

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "local-ai": {
+      "command": "C:\\Python313\\python.exe",
+      "args": [
+        "G:\\04-CODING\\Local Ai\\backend\\mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "G:\\04-CODING\\Local Ai\\backend"
+      }
+    }
+  }
+}

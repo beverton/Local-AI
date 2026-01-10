@@ -1,0 +1,952 @@
+{
+  "version": "4.0",
+  "type": "prototype3",
+  "timestamp": "2025-01-10T00:00:00.000Z",
+  "changeTracking": {
+    "lastSync": "2025-01-10T00:00:00.000Z",
+    "currentSync": "2025-01-10T00:00:00.000Z",
+    "changedNodes": 0,
+    "totalNodes": 0,
+    "migration": {
+      "oldSystem": "deactivated",
+      "newSystem": "simple-save",
+      "timestamp": "2025-01-10T00:00:00.000Z"
+    }
+  },
+  "kiMarkedNodes": [],
+  "nodes": [
+    {
+      "id": "node_start",
+      "title": "🚀 START: API Request",
+      "subtitle": "Chat oder MCP Request empfangen",
+      "x": -2000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_start_001",
+          "title": "Request-Eingang",
+          "text": "API-Endpoints empfangen Requests:\n- /chat (main.py) - Normale Chat-Requests\n- /chat (model_service.py) - Model Service Chat\n- MCP Adapter - MCP-Requests von Cursor",
+          "tag": "api, entry-point",
+          "weight": 10
+        },
+        {
+          "id": "desc_start_002",
+          "title": "use_case Parameter",
+          "text": "Request enthält optionalen use_case Parameter:\n- 'chat' (Default) - Normale Konversation\n- 'mcp_coding' - Coding-Modus für Cursor\n- Fehlt Parameter → Default = 'chat'",
+          "tag": "parameter, routing",
+          "weight": 10
+        },
+        {
+          "id": "desc_start_003",
+          "title": "Request-Format",
+          "text": "ChatRequest enthält:\n- message: str\n- messages: Optional[List[Dict]]\n- conversation_id: Optional[str]\n- max_length: int (default: 2048)\n- temperature: float (default: 0.3)\n- language: Optional[str] (default: 'de')",
+          "tag": "data-structure, request",
+          "weight": 9
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_start_001",
+          "name": "Request-Rate",
+          "value": 0,
+          "unit": "req/s",
+          "tag": "performance"
+        },
+        {
+          "id": "factor_start_002",
+          "name": "Use Case Distribution",
+          "value": 0,
+          "unit": "% chat / % coding",
+          "tag": "usage"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_start_001",
+          "name": "Request empfangen?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "entry",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "primary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_use_case_manager",
+      "title": "🎯 UseCaseProfileManager",
+      "subtitle": "Zentrale Profile-Verwaltung und Routing",
+      "x": -1000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_manager_001",
+          "title": "Profile-Registry",
+          "text": "Verwaltet alle verfügbaren Use Case Profile:\n- chat: Normale Chat-Konversation\n- mcp_coding: Coding-Modus für MCP/Cursor\n- Erweiterbar für weitere Use Cases",
+          "tag": "core, registry",
+          "weight": 10
+        },
+        {
+          "id": "desc_manager_002",
+          "title": "Profile-Auswahl",
+          "text": "get_profile(use_case: str) → UseCaseProfile:\n1. Prüfe use_case Parameter\n2. Fallback auf 'chat' wenn nicht angegeben\n3. Lade Profile aus Registry\n4. Fallback auf Default-Profile bei Fehler",
+          "tag": "routing, selection",
+          "weight": 10
+        },
+        {
+          "id": "desc_manager_003",
+          "title": "Konfiguration",
+          "text": "Lädt Profile-Konfiguration aus:\n- data/use_case_profiles.json\n- Enthält: prompt_template, response_processor, temperature, max_length, validation, cleaning",
+          "tag": "config, loading",
+          "weight": 9
+        },
+        {
+          "id": "desc_manager_004",
+          "title": "Simultane Nutzung",
+          "text": "Profile sind stateless - können kurz nacheinander verwendet werden:\n- Chat-Request → chat Profile\n- Coding-Request → mcp_coding Profile\n- Kein Modell-Neuladen nötig",
+          "tag": "stateless, simultaneous",
+          "weight": 10
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_manager_001",
+          "name": "Verfügbare Profile",
+          "value": 2,
+          "unit": "Profile",
+          "tag": "variety"
+        },
+        {
+          "id": "factor_manager_002",
+          "name": "Profile-Load-Zeit",
+          "value": 0,
+          "unit": "ms",
+          "tag": "performance"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_manager_001",
+          "name": "Profile gefunden?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "routing",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "primary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_chat_profile",
+      "title": "💬 Chat Profile",
+      "subtitle": "Normale Konversation - Bestehende Logik",
+      "x": 0,
+      "y": -500,
+      "descriptions": [
+        {
+          "id": "desc_chat_001",
+          "title": "Prompt Template",
+          "text": "Generiert System-Prompt basierend auf:\n- Modell-Typ (Qwen, Mistral, Phi-3)\n- Sprache (de, en)\n- Bestehende Logik aus main.py Zeile 1242-1278\n\nBeispiel Qwen (de):\n'Du bist ein hilfreicher, präziser und freundlicher AI-Assistent. Antworte klar und direkt auf Deutsch. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten.'",
+          "tag": "prompt, template",
+          "weight": 10
+        },
+        {
+          "id": "desc_chat_002",
+          "title": "Response Processor",
+          "text": "ChatResponseProcessor:\n1. Minimal Cleaning (nur kritische Marker)\n2. HTML-Quellen-Header unterstützen\n3. Quality Management aktiv\n4. Web-Validation optional\n\nVerwendet _clean_response_minimal() aus model_manager.py Zeile 664",
+          "tag": "processing, cleaning",
+          "weight": 10
+        },
+        {
+          "id": "desc_chat_003",
+          "title": "Validation",
+          "text": "Locker Validierung:\n- Prüft auf vollständige Sätze\n- Akzeptiert verschiedene Formate\n- Prüft auf System-Prompt-Phrasen\n- Prüft auf User-Nachricht-Wiederholung\n\nVerwendet _validate_response() aus model_manager.py Zeile 545",
+          "tag": "validation, quality",
+          "weight": 9
+        },
+        {
+          "id": "desc_chat_004",
+          "title": "Parameter",
+          "text": "Temperature: 0.7 (kreativer)\nMax Length: 2048\nCleaning: minimal (nur kritische Marker)\nQuality Management: aktiv",
+          "tag": "parameters, config",
+          "weight": 8
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_chat_001",
+          "name": "Temperature",
+          "value": 0.7,
+          "unit": "",
+          "tag": "creativity"
+        },
+        {
+          "id": "factor_chat_002",
+          "name": "Max Length",
+          "value": 2048,
+          "unit": "tokens",
+          "tag": "length"
+        },
+        {
+          "id": "factor_chat_003",
+          "name": "Quality Management",
+          "value": 1,
+          "unit": "aktiv",
+          "tag": "quality"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_chat_001",
+          "name": "Chat Profile aktiv?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "info",
+          "tag": "profile",
+          "color": "#17a2b8"
+        }
+      ],
+      "outlineColorKey": "info",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_mcp_coding_profile",
+      "title": "💻 MCP Coding Profile",
+      "subtitle": "Coding-Modus für Cursor Integration",
+      "x": 0,
+      "y": 500,
+      "descriptions": [
+        {
+          "id": "desc_mcp_001",
+          "title": "Prompt Template",
+          "text": "Explizit für Code-Generierung optimiert:\n\n'Du bist ein Experte für Programmierung. Wenn du Code bereitstellst:\n1. Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)\n2. Füge hilfreiche Kommentare hinzu, die wichtige Teile erklären\n3. Befolge Best Practices und Coding-Standards\n4. Behandle Fehler angemessen (try/except, Fehlerbehandlung)\n5. Schreibe sauberen, lesbaren und wartbaren Code\n6. Erkläre kurz was der Code macht, falls nötig'\n\nBasiert auf main.py Zeile 1253-1270",
+          "tag": "prompt, coding",
+          "weight": 10
+        },
+        {
+          "id": "desc_mcp_002",
+          "title": "Response Processor",
+          "text": "MCPCodingResponseProcessor:\n1. Code-Block-Extraktion und Validierung\n2. KEINE aggressive Bereinigung (Code könnte beschädigt werden)\n3. Syntax-Indikatoren prüfen\n4. KEINE HTML-Quellen (nicht relevant für Coding)\n\nMinimal Cleaning: Nur Chat-Template-Marker entfernen",
+          "tag": "processing, code",
+          "weight": 10
+        },
+        {
+          "id": "desc_mcp_003",
+          "title": "Validation",
+          "text": "Code-fokussierte Validierung:\n- Prüft auf gültige Code-Blocks (```language)\n- Prüft auf Syntax-Indikatoren (def, class, function, etc.)\n- Prüft auf vollständige Code-Struktur\n- Fallback: Wenn kein Code-Block, prüfe ob es gültiger Text ist",
+          "tag": "validation, code",
+          "weight": 9
+        },
+        {
+          "id": "desc_mcp_004",
+          "title": "Parameter",
+          "text": "Temperature: 0.3 (deterministischer)\nMax Length: 4096 (längere Code-Antworten)\nCleaning: code_preserving (minimal)\nQuality Management: deaktiviert (nicht relevant)",
+          "tag": "parameters, config",
+          "weight": 8
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_mcp_001",
+          "name": "Temperature",
+          "value": 0.3,
+          "unit": "",
+          "tag": "deterministic"
+        },
+        {
+          "id": "factor_mcp_002",
+          "name": "Max Length",
+          "value": 4096,
+          "unit": "tokens",
+          "tag": "length"
+        },
+        {
+          "id": "factor_mcp_003",
+          "name": "Code-Block-Validierung",
+          "value": 1,
+          "unit": "aktiv",
+          "tag": "validation"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_mcp_001",
+          "name": "MCP Coding Profile aktiv?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "warning",
+          "tag": "profile",
+          "color": "#ffc107"
+        }
+      ],
+      "outlineColorKey": "warning",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_prompt_generation",
+      "title": "📝 Prompt Generation",
+      "subtitle": "System-Prompt basierend auf Profile",
+      "x": 1000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_prompt_001",
+          "title": "Template-Auswahl",
+          "text": "Profile.prompt_template() wird aufgerufen:\n- Input: messages, model_id, language, use_case\n- Output: System-Prompt String\n\nTemplate-Logik:\n1. Prüfe Modell-Typ (Qwen, Mistral, Phi-3)\n2. Prüfe Sprache (de, en)\n3. Prüfe use_case (chat, mcp_coding)\n4. Generiere entsprechenden Prompt",
+          "tag": "template, generation",
+          "weight": 10
+        },
+        {
+          "id": "desc_prompt_002",
+          "title": "Chat Template",
+          "text": "Bestehende Logik aus:\n- main.py Zeile 1242-1278 (Chat-Endpoint)\n- model_service.py Zeile 996-1009 (Model Service)\n\nUnterschiede:\n- Qwen: Standard-Prompt oder Coding-Prompt (wenn is_coding)\n- Mistral: Kurze, präzise Antworten\n- Phi-3: ChatML-Format",
+          "tag": "chat, template",
+          "weight": 9
+        },
+        {
+          "id": "desc_prompt_003",
+          "title": "MCP Coding Template",
+          "text": "Spezieller Coding-Prompt:\n- Fokus auf Code-Qualität\n- Markdown Code-Blocks erwünscht\n- Best Practices\n- Fehlerbehandlung\n\nBasiert auf main.py Zeile 1253-1270",
+          "tag": "coding, template",
+          "weight": 9
+        },
+        {
+          "id": "desc_prompt_004",
+          "title": "Message-Formatierung",
+          "text": "Messages werden formatiert:\n1. System-Prompt wird hinzugefügt (wenn nicht vorhanden)\n2. Chat-Template wird angewendet (tokenizer.apply_chat_template)\n3. Fallback für ältere Modelle (manuelle Formatierung)\n\nSiehe model_manager.py Zeile 837-861",
+          "tag": "formatting, messages",
+          "weight": 8
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_prompt_001",
+          "name": "Template-Varianten",
+          "value": 6,
+          "unit": "Varianten",
+          "tag": "variety"
+        },
+        {
+          "id": "factor_prompt_002",
+          "name": "Prompt-Generierungs-Zeit",
+          "value": 0,
+          "unit": "ms",
+          "tag": "performance"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_prompt_001",
+          "name": "Prompt generiert?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "generation",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "primary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_model_generation",
+      "title": "🤖 Model Generation",
+      "subtitle": "ModelManager.generate() - Modell-Aufruf",
+      "x": 2000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_model_001",
+          "title": "Generate-Methode",
+          "text": "model_manager.generate():\n- Input: messages, max_length, temperature, use_case\n- Delegiert an Profile für Response-Processing\n- Verwendet _generate_internal() für eigentliche Generierung\n\nSiehe model_manager.py Zeile 484-534",
+          "tag": "generation, core",
+          "weight": 10
+        },
+        {
+          "id": "desc_model_002",
+          "title": "Generate Internal",
+          "text": "_generate_internal():\n1. Chat-Template anwenden (tokenizer.apply_chat_template)\n2. Tokenize Input\n3. Input-Länge prüfen und kürzen (wenn nötig)\n4. model.generate() aufrufen\n5. Decode Response\n6. Profile-spezifisches Cleaning anwenden\n\nSiehe model_manager.py Zeile 823-1214",
+          "tag": "internal, processing",
+          "weight": 10
+        },
+        {
+          "id": "desc_model_003",
+          "title": "Input-Kürzung",
+          "text": "Automatische Input-Kürzung wenn zu lang:\n- Entfernt älteste Messages aus History\n- Behält System-Prompt und erste User-Message\n- Kürzt User-Message wenn nötig\n\nSiehe model_manager.py Zeile 872-930",
+          "tag": "input, truncation",
+          "weight": 9
+        },
+        {
+          "id": "desc_model_004",
+          "title": "EOS Tokens",
+          "text": "Qwen-spezifische EOS-Token-Behandlung:\n- eos_token_id: [151643, 151645]\n- Prüft auf Duplikate\n- Verwendet im_end_id wenn unterschiedlich\n\nSiehe model_manager.py Zeile 1000-1020",
+          "tag": "eos, tokens",
+          "weight": 8
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_model_001",
+          "name": "Generierungs-Zeit",
+          "value": 0,
+          "unit": "s",
+          "tag": "performance"
+        },
+        {
+          "id": "factor_model_002",
+          "name": "Token-Rate",
+          "value": 0,
+          "unit": "tokens/s",
+          "tag": "performance"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_model_001",
+          "name": "Modell geladen?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "model",
+          "color": "#28a745"
+        },
+        {
+          "id": "cond_model_002",
+          "name": "Generierung erfolgreich?",
+          "type": "ODER",
+          "weight": 9,
+          "colorKey": "success",
+          "tag": "generation",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "primary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_response_processing",
+      "title": "🔧 Response Processing",
+      "subtitle": "Profile-spezifische Response-Verarbeitung",
+      "x": 3000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_response_001",
+          "title": "Processing-Pipeline",
+          "text": "Profile.response_processor() wird aufgerufen:\n1. Raw Response vom Modell\n2. Profile-spezifisches Cleaning\n3. Profile-spezifische Validierung\n4. Formatierung (HTML, Code-Blocks, etc.)\n5. Finale Response",
+          "tag": "pipeline, processing",
+          "weight": 10
+        },
+        {
+          "id": "desc_response_002",
+          "title": "Chat Processing",
+          "text": "ChatResponseProcessor:\n- Minimal Cleaning (nur kritische Marker)\n- HTML-Quellen-Header unterstützen\n- Quality Management aktiv\n- Web-Validation optional\n\nVerwendet _clean_response_minimal() aus model_manager.py Zeile 664-821",
+          "tag": "chat, cleaning",
+          "weight": 10
+        },
+        {
+          "id": "desc_response_003",
+          "title": "MCP Coding Processing",
+          "text": "MCPCodingResponseProcessor:\n- Code-Block-Extraktion\n- KEINE aggressive Bereinigung\n- Syntax-Validierung\n- Code-Formatierung\n\nMinimal: Nur Chat-Template-Marker entfernen",
+          "tag": "coding, cleaning",
+          "weight": 10
+        },
+        {
+          "id": "desc_response_004",
+          "title": "Robuste Validierung",
+          "text": "Stufenweise Validierung:\n1. Basis (nicht leer, minimale Länge)\n2. Use-Case-spezifisch\n3. Fallback-Strategien\n\nIntelligente Fallbacks:\n- Nur Sonderzeichen → Retry\n- Zu kurz → Prüfe Code-Block\n- Unvollständig → Prüfe Truncation",
+          "tag": "validation, robust",
+          "weight": 9
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_response_001",
+          "name": "Processing-Zeit",
+          "value": 0,
+          "unit": "ms",
+          "tag": "performance"
+        },
+        {
+          "id": "factor_response_002",
+          "name": "Validierungs-Rate",
+          "value": 0,
+          "unit": "% erfolgreich",
+          "tag": "quality"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_response_001",
+          "name": "Processing erfolgreich?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "processing",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "primary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_quality_management",
+      "title": "✅ Quality Management",
+      "subtitle": "Optional - nur für Chat Profile",
+      "x": 3000,
+      "y": -500,
+      "descriptions": [
+        {
+          "id": "desc_quality_001",
+          "title": "Quality Checks",
+          "text": "QualityManager.validate_response():\n- Web-Validation (optional)\n- Hallucination-Check (optional)\n- Contradiction-Check\n- Actuality-Check\n- Source-Quality-Check\n- Completeness-Check\n\nSiehe quality_manager.py Zeile 95-188",
+          "tag": "quality, validation",
+          "weight": 10
+        },
+        {
+          "id": "desc_quality_002",
+          "title": "Retry-Mechanismus",
+          "text": "Wenn Quality-Checks fehlschlagen:\n- Retry mit Feedback-Prompt\n- Max 2 Retries\n- Beste verfügbare Antwort wird genutzt\n\nSiehe main.py Zeile 1102-1166",
+          "tag": "retry, quality",
+          "weight": 9
+        },
+        {
+          "id": "desc_quality_003",
+          "title": "Web-Validation & Hallucination",
+          "text": "Beide können parallel laufen:\n- has_quality_checks = web_validation OR hallucination_check\n- Retries aktiv wenn mindestens eines aktiv\n- Beide Checks sammeln Issues\n\nSiehe main.py Zeile 1102-1166 (gefixt)",
+          "tag": "parallel, quality",
+          "weight": 10
+        },
+        {
+          "id": "desc_quality_004",
+          "title": "Nur für Chat",
+          "text": "Quality Management ist NUR für Chat Profile aktiv:\n- MCP Coding braucht keine Web-Validation\n- Code-Qualität wird durch Syntax-Check geprüft\n- Keine Quellen-Validierung für Code",
+          "tag": "chat-only, quality",
+          "weight": 8
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_quality_001",
+          "name": "Quality-Checks aktiv",
+          "value": 1,
+          "unit": "ja",
+          "tag": "quality"
+        },
+        {
+          "id": "factor_quality_002",
+          "name": "Retry-Rate",
+          "value": 0,
+          "unit": "%",
+          "tag": "retry"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_quality_001",
+          "name": "Quality Management aktiv?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "info",
+          "tag": "quality",
+          "color": "#17a2b8"
+        }
+      ],
+      "outlineColorKey": "info",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_mcp_adapter",
+      "title": "🔌 MCP Adapter",
+      "subtitle": "Cursor Integration - automatisch mcp_coding",
+      "x": -1000,
+      "y": 500,
+      "descriptions": [
+        {
+          "id": "desc_mcp_adapter_001",
+          "title": "MCP-Request-Handling",
+          "text": "MCPAdapter.model_service_to_mcp():\n- Konvertiert Model Service Response zu MCP-Format\n- Verwendet automatisch mcp_coding Profile\n- Keine manuelle Prompt-Generierung mehr\n\nSiehe mcp_adapter.py Zeile 33-50",
+          "tag": "mcp, adapter",
+          "weight": 10
+        },
+        {
+          "id": "desc_mcp_adapter_002",
+          "title": "Automatische Profile-Auswahl",
+          "text": "Alle MCP-Requests verwenden automatisch:\n- use_case = 'mcp_coding'\n- Kein use_case Parameter nötig\n- Profile wird automatisch gesetzt\n\nIntegration in mcp_adapter.py",
+          "tag": "auto, profile",
+          "weight": 10
+        },
+        {
+          "id": "desc_mcp_adapter_003",
+          "title": "Response-Format",
+          "text": "MCP-Format:\n{\n  'content': [{\n    'type': 'text',\n    'text': response_text\n  }]\n}\n\nCode-Blocks werden automatisch formatiert",
+          "tag": "format, mcp",
+          "weight": 9
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_mcp_adapter_001",
+          "name": "MCP-Requests",
+          "value": 0,
+          "unit": "req/s",
+          "tag": "usage"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_mcp_adapter_001",
+          "name": "MCP-Request empfangen?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "warning",
+          "tag": "mcp",
+          "color": "#ffc107"
+        }
+      ],
+      "outlineColorKey": "warning",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_end",
+      "title": "✅ END: Response zurückgeben",
+      "subtitle": "Finale Response an Client",
+      "x": 4000,
+      "y": 0,
+      "descriptions": [
+        {
+          "id": "desc_end_001",
+          "title": "Response-Format",
+          "text": "ChatResponse:\n{\n  'response': str,\n  'conversation_id': str\n}\n\nMCP-Response:\n{\n  'content': [{\n    'type': 'text',\n    'text': str\n  }]\n}",
+          "tag": "response, format",
+          "weight": 10
+        },
+        {
+          "id": "desc_end_002",
+          "title": "Backward Compatibility",
+          "text": "Bestehende Chats funktionieren weiterhin:\n- use_case Parameter ist optional\n- Default = 'chat'\n- Keine Breaking Changes",
+          "tag": "compatibility, migration",
+          "weight": 9
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_end_001",
+          "name": "Response-Zeit",
+          "value": 0,
+          "unit": "ms",
+          "tag": "performance"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_end_001",
+          "name": "Response erfolgreich?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "end",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "success",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    },
+    {
+      "id": "node_config",
+      "title": "⚙️ Konfiguration",
+      "subtitle": "data/use_case_profiles.json",
+      "x": -1000,
+      "y": -1000,
+      "descriptions": [
+        {
+          "id": "desc_config_001",
+          "title": "Profile-Konfiguration",
+          "text": "JSON-Struktur:\n{\n  'profiles': {\n    'chat': {\n      'prompt_template': 'chat',\n      'response_processor': 'chat',\n      'temperature': 0.7,\n      'max_length': 2048,\n      'validation': 'loose',\n      'cleaning': 'minimal'\n    },\n    'mcp_coding': {\n      'prompt_template': 'mcp_coding',\n      'response_processor': 'mcp_coding',\n      'temperature': 0.3,\n      'max_length': 4096,\n      'validation': 'code_focused',\n      'cleaning': 'code_preserving'\n    }\n  }\n}",
+          "tag": "config, json",
+          "weight": 10
+        },
+        {
+          "id": "desc_config_002",
+          "title": "Erweiterbarkeit",
+          "text": "Neue Profile können einfach hinzugefügt werden:\n1. Profile in JSON definieren\n2. Prompt-Template implementieren\n3. Response-Processor implementieren\n4. In Registry registrieren",
+          "tag": "extensibility, config",
+          "weight": 9
+        }
+      ],
+      "factors": [
+        {
+          "id": "factor_config_001",
+          "name": "Konfigurierte Profile",
+          "value": 2,
+          "unit": "Profile",
+          "tag": "variety"
+        }
+      ],
+      "conditions": [
+        {
+          "id": "cond_config_001",
+          "name": "Config geladen?",
+          "type": "ODER",
+          "weight": 10,
+          "colorKey": "success",
+          "tag": "config",
+          "color": "#28a745"
+        }
+      ],
+      "outlineColorKey": "secondary",
+      "contentVisibility": {
+        "descriptions": true,
+        "factors": true,
+        "conditions": true
+      },
+      "manualSize": null,
+      "created": "2025-01-10T00:00:00.000Z",
+      "lastModified": "2025-01-10T00:00:00.000Z"
+    }
+  ],
+  "connections": [
+    {
+      "id": "conn_001",
+      "sourceId": "node_start",
+      "targetId": "node_use_case_manager",
+      "color": "#28a745",
+      "direction": "forward",
+      "conditionId": "cond_start_001",
+      "colorKey": "success"
+    },
+    {
+      "id": "conn_002",
+      "sourceId": "node_use_case_manager",
+      "targetId": "node_chat_profile",
+      "color": "#17a2b8",
+      "direction": "forward",
+      "conditionId": "cond_manager_001",
+      "colorKey": "info"
+    },
+    {
+      "id": "conn_003",
+      "sourceId": "node_use_case_manager",
+      "targetId": "node_mcp_coding_profile",
+      "color": "#ffc107",
+      "direction": "forward",
+      "conditionId": "cond_manager_001",
+      "colorKey": "warning"
+    },
+    {
+      "id": "conn_004",
+      "sourceId": "node_chat_profile",
+      "targetId": "node_prompt_generation",
+      "color": "#17a2b8",
+      "direction": "forward",
+      "conditionId": "cond_chat_001",
+      "colorKey": "info"
+    },
+    {
+      "id": "conn_005",
+      "sourceId": "node_mcp_coding_profile",
+      "targetId": "node_prompt_generation",
+      "color": "#ffc107",
+      "direction": "forward",
+      "conditionId": "cond_mcp_001",
+      "colorKey": "warning"
+    },
+    {
+      "id": "conn_006",
+      "sourceId": "node_prompt_generation",
+      "targetId": "node_model_generation",
+      "color": "#6563ca",
+      "direction": "forward",
+      "conditionId": "cond_prompt_001",
+      "colorKey": "primary"
+    },
+    {
+      "id": "conn_007",
+      "sourceId": "node_model_generation",
+      "targetId": "node_response_processing",
+      "color": "#6563ca",
+      "direction": "forward",
+      "conditionId": "cond_model_002",
+      "colorKey": "primary"
+    },
+    {
+      "id": "conn_008",
+      "sourceId": "node_chat_profile",
+      "targetId": "node_quality_management",
+      "color": "#17a2b8",
+      "direction": "forward",
+      "conditionId": "cond_chat_001",
+      "colorKey": "info"
+    },
+    {
+      "id": "conn_009",
+      "sourceId": "node_quality_management",
+      "targetId": "node_response_processing",
+      "color": "#17a2b8",
+      "direction": "forward",
+      "conditionId": "cond_quality_001",
+      "colorKey": "info"
+    },
+    {
+      "id": "conn_010",
+      "sourceId": "node_response_processing",
+      "targetId": "node_end",
+      "color": "#28a745",
+      "direction": "forward",
+      "conditionId": "cond_response_001",
+      "colorKey": "success"
+    },
+    {
+      "id": "conn_011",
+      "sourceId": "node_mcp_adapter",
+      "targetId": "node_use_case_manager",
+      "color": "#ffc107",
+      "direction": "forward",
+      "conditionId": "cond_mcp_adapter_001",
+      "colorKey": "warning"
+    },
+    {
+      "id": "conn_012",
+      "sourceId": "node_config",
+      "targetId": "node_use_case_manager",
+      "color": "#6c757d",
+      "direction": "forward",
+      "conditionId": "cond_config_001",
+      "colorKey": "secondary"
+    }
+  ],
+  "metadata": {
+    "panX": 0,
+    "panY": 0,
+    "zoom": 0.5
+  },
+  "globalSettings": {
+    "font": {
+      "titleSize": 22,
+      "titleWeight": 600,
+      "subtitleSize": 21,
+      "subtitleWeight": 500,
+      "contentSize": 18,
+      "contentWeight": 300
+    },
+    "fontFamily": "'Poppins', sans-serif",
+    "spacing": {
+      "lineSpacing": 24,
+      "elementSpacing": 15,
+      "padding": 15
+    },
+    "colors": {
+      "primary": "#6563ca",
+      "secondary": "#6c757d",
+      "success": "#28a745",
+      "danger": "#dc3545",
+      "warning": "#ffc107",
+      "info": "#17a2b8",
+      "light": "#f8f9fa",
+      "dark": "#32699f",
+      "text": "#333333",
+      "textMuted": "#666666",
+      "textLight": "#999999",
+      "background": "#ffffff",
+      "backgroundLight": "#f8f9fa",
+      "backgroundDark": "#e9ecef",
+      "border": "#dee2e6",
+      "borderLight": "#f1f3f4",
+      "borderDark": "#adb5bd",
+      "tagBug": "#dc3545",
+      "tagTodo": "#ffc107",
+      "tagHide": "#6c757d",
+      "tagImportant": "#dc3545",
+      "tagCustom1": "#17a2b8",
+      "tagCustom2": "#6f42c1",
+      "tagCustom3": "#fd7e14",
+      "tagCustom4": "#20c997"
+    },
+    "colorTitles": {
+      "primary": "Primary",
+      "secondary": "Secondary",
+      "success": "Success",
+      "warning": "Warning",
+      "danger": "Danger",
+      "info": "Info",
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "panelWidth": 600
+  },
+  "zones": []
+}

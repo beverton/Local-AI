@@ -30,10 +30,10 @@ def test_initialize():
     # Hier prüfen wir nur ob keine Exception geworfen wird
     try:
         result = server.handle_initialize(request["params"])
-        print(f"✓ Initialize erfolgreich: {result.get('serverInfo', {}).get('name')}")
+        print(f"[OK] Initialize erfolgreich: {result.get('serverInfo', {}).get('name')}")
         return True
     except Exception as e:
-        print(f"✗ Initialize fehlgeschlagen: {e}")
+        print(f"[FAIL] Initialize fehlgeschlagen: {e}")
         return False
 
 
@@ -46,12 +46,12 @@ def test_tools_list():
     try:
         result = server.handle_tools_list()
         tools = result.get("tools", [])
-        print(f"✓ Tools-Liste erfolgreich: {len(tools)} Tools gefunden")
+        print(f"[OK] Tools-Liste erfolgreich: {len(tools)} Tools gefunden")
         for tool in tools:
             print(f"  - {tool.get('name')}: {tool.get('description', '')[:50]}...")
         return True
     except Exception as e:
-        print(f"✗ Tools-Liste fehlgeschlagen: {e}")
+        print(f"[FAIL] Tools-Liste fehlgeschlagen: {e}")
         return False
 
 
@@ -63,7 +63,7 @@ def test_model_service_connection():
     try:
         available = server.model_service.is_available()
         if available:
-            print("✓ Model Service ist erreichbar")
+            print("[OK] Model Service ist erreichbar")
             status = server.model_service.get_status()
             if status:
                 print(f"  Text Model: {status.get('text_model', {}).get('loaded', False)}")
@@ -71,10 +71,10 @@ def test_model_service_connection():
                 print(f"  Image Model: {status.get('image_model', {}).get('loaded', False)}")
             return True
         else:
-            print("⚠ Model Service ist nicht erreichbar (muss auf Port 8001 laufen)")
+            print("[WARN] Model Service ist nicht erreichbar (muss auf Port 8001 laufen)")
             return False
     except Exception as e:
-        print(f"✗ Model Service Test fehlgeschlagen: {e}")
+        print(f"[FAIL] Model Service Test fehlgeschlagen: {e}")
         return False
 
 def test_model_tools():
@@ -84,29 +84,34 @@ def test_model_tools():
     server.initialized = True
     
     if not server.model_service.is_available():
-        print("⚠ Model Service nicht verfügbar - überspringe Tool-Tests")
+        print("[WARN] Model Service nicht verfügbar - überspringe Tool-Tests")
         return True  # Nicht als Fehler werten
     
     try:
         # Test list_models
         result = server.handle_tools_call("list_models", {"model_type": "text"})
-        print("✓ list_models funktioniert")
+        print("[OK] list_models funktioniert")
         
         # Test model_status
         result = server.handle_tools_call("model_status", {"model_type": "text"})
-        print("✓ model_status funktioniert")
+        print("[OK] model_status funktioniert")
         
         # Test chat (nur wenn Modell geladen ist)
         status = server.model_service.get_text_model_status()
         if status and status.get("loaded"):
-            result = server.handle_tools_call("chat", {"message": "Hallo", "max_length": 100, "temperature": 0.3})
-            print("✓ chat funktioniert")
+            # Verwende längeres max_length für bessere Validierung
+            result = server.handle_tools_call("chat", {"message": "Hallo, wie geht es dir?", "max_length": 512, "temperature": 0.7})
+            print("[OK] chat funktioniert")
+            # Zeige Vorschau der Antwort
+            if result and result.get("content"):
+                response_text = result["content"][0].get("text", "")[:100]
+                print(f"  Antwort-Vorschau: {response_text}...")
         else:
-            print("⚠ Modell nicht geladen - überspringe chat-Test")
+            print("[WARN] Modell nicht geladen - überspringe chat-Test")
         
         return True
     except Exception as e:
-        print(f"✗ Model Tools Test fehlgeschlagen: {e}")
+        print(f"[FAIL] Model Tools Test fehlgeschlagen: {e}")
         return False
 
 
@@ -126,10 +131,10 @@ if __name__ == "__main__":
     print("=" * 50)
     
     if all(results):
-        print("\n✓ Alle Tests erfolgreich!")
+        print("\n[OK] Alle Tests erfolgreich!")
         sys.exit(0)
     else:
-        print("\n⚠ Einige Tests fehlgeschlagen")
+        print("\n[WARN] Einige Tests fehlgeschlagen")
         sys.exit(1)
 
 

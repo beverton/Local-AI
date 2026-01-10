@@ -595,7 +595,14 @@ class ModelManager:
                 logger.debug("[Validation] Response wiederholt nur User-Nachricht")
                 return False
         
-        logger.debug(f"[Validation] Response ist gültig: {len(response_stripped)} Zeichen")
+        # NEUE PRÜFUNG: Response sollte mindestens ein Wort enthalten (nicht nur Sonderzeichen)
+        import re
+        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]+\b', response_stripped)
+        if len(words) == 0 and len(response_stripped) < 10:
+            logger.debug(f"[Validation] Response enthält keine Wörter (nur Sonderzeichen): {repr(response_stripped)}")
+            return False
+        
+        logger.debug(f"[Validation] Response ist gültig: {len(response_stripped)} Zeichen, {len(words)} Wörter")
         return True
     
     def _check_completeness(self, response: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -663,10 +670,17 @@ class ModelManager:
     
     def _clean_response_minimal(self, response: str, messages: List[Dict[str, str]], original_prompt: str = "") -> str:
         """
-        🔧 NEUE MINIMALISTISCHE RESPONSE-BEREINIGUNG
+        🔧 ROBUSTE RESPONSE-BEREINIGUNG (4-Phasen-Ansatz)
         
-        Macht NUR das Absolute Minimum an Bereinigung.
-        Optionale Cleanings sind kommentiert und können bei Bedarf aktiviert werden.
+        Implementiert einen robusten, validierten Cleaning-Prozess mit Fallback-Mechanismus.
+        Garantiert dass Code-Blocks intakt bleiben und Responses gültig sind.
+        
+        Prinzipien:
+        1. Fail-Safe: Immer Fallback auf Original
+        2. Validierung nach jedem Schritt
+        3. Modell-spezifisch
+        4. Code-Block-Priorität
+        5. Minimal Invasiv
         
         Args:
             response: Die rohe Response vom Modell
@@ -676,91 +690,322 @@ class ModelManager:
         Returns:
             Bereinigte Response
         """
-        # ============================================================================
-        # MINIMALISTISCHE BASIS-BEREINIGUNG (IMMER AKTIV)
-        # ============================================================================
+        import re
         
-        # 1. Entferne Chat-Template-Markierungen (KRITISCH für Qwen/LLaMA)
+        # Backup für Fallback
+        original_response = response
+        
+        # ============================================================
+        # PHASE 1: Token-Level Cleaning (KRITISCH)
+        # ============================================================
+        response = self._clean_tokens(response)
+        if not self._validate_basic(response):
+            logger.warning("[Clean] Phase 1 (Token) fehlgeschlagen, verwende Fallback")
+            return self._fallback_clean(original_response)
+        
+        # ============================================================
+        # PHASE 2: Struktur-Level Cleaning (WICHTIG)
+        # ============================================================
+        response = self._clean_structure(response, messages)
+        if not self._validate_basic(response):
+            logger.warning("[Clean] Phase 2 (Struktur) fehlgeschlagen, verwende Fallback")
+            return self._fallback_clean(original_response)
+        
+        # ============================================================
+        # PHASE 3: Content-Level Cleaning (OPTIONAL)
+        # ============================================================
+        if self._needs_content_cleaning(response):
+            response = self._clean_content(response)
+            if not self._validate_basic(response):
+                logger.warning("[Clean] Phase 3 (Content) fehlgeschlagen, verwende Fallback")
+                return self._fallback_clean(original_response)
+        
+        # ============================================================
+        # PHASE 4: Final Validation
+        # ============================================================
+        if not self._validate_final(response):
+            logger.warning("[Clean] Finale Validierung fehlgeschlagen, verwende Fallback")
+            return self._fallback_clean(original_response)
+        
+        logger.info(f"[Clean] Response erfolgreich bereinigt: {len(original_response)} -> {len(response)} Zeichen")
+        return response
+    
+    def _clean_tokens(self, response: str) -> str:
+        """
+        Phase 1: Token-Level Cleaning
+        Entfernt Modell-spezifische Tokens und Stop-Sequenzen
+        """
+        # 1. Chat-Template-Tokens (Qwen, LLaMA)
         response = response.replace("<|im_end|>", "").replace("<|im_start|>", "")
         
-        # 2. Entferne führende/trailing Whitespace
-        response = response.strip()
+        # 2. Special Tokens
+        special_tokens = ["</s>", "<|end|>", "<|endoftext|>"]
+        for token in special_tokens:
+            response = response.replace(token, "")
         
-        # 3. Entferne "assistant:" Präfix falls vorhanden
+        # 3. Assistant Prefix entfernen
+        response = response.strip()
         if response.lower().startswith('assistant:'):
             response = response[10:].strip()
         elif response.lower().startswith('assistant '):
             response = response[9:].strip()
         
-        logger.info(f"[Clean] Minimal cleaning done: {len(response)} chars")
-        
-        # ============================================================================
-        # OPTIONALE CLEANINGS (KOMMENTIERT - BEI BEDARF AKTIVIEREN)
-        # ============================================================================
-        
-        # OPTION A: Entferne "assistant" Marker in der Mitte der Response
-        # Nutzen: Wenn Modell vollständigen Chat generiert mit Markern
-        # Risiko: Niedrig - nur Marker werden entfernt
-        # AKTIVIEREN: Entferne die # vor den nächsten Zeilen
-        # response_lower = response.lower()
-        # for marker in ["assistant ", "assistant:", "assistant\n"]:
-        #     pos = response_lower.find(marker)
-        #     if pos > 0:  # Nicht am Anfang
-        #         response = response[pos + len(marker):].strip()
-        #         logger.debug(f"[Clean] 'assistant' marker removed from middle")
-        #         break
-        
-        # OPTION B: Entferne System-Prompt-Phrasen
-        # Nutzen: Wenn Modell System-Prompt in Response wiederholt
-        # Risiko: MITTEL - Könnte legitime Antworten über "AI-Assistent" beschädigen
-        # AKTIVIEREN: Entferne die # vor den nächsten Zeilen
-        # system_phrases = ["Du bist ein hilfreicher", "AI-Assistent"]
-        # for phrase in system_phrases:
-        #     if phrase in response:
-        #         lines = response.split('\n')
-        #         response = '\n'.join([l for l in lines if phrase not in l]).strip()
-        #         logger.debug(f"[Clean] System phrase '{phrase}' removed")
-        
-        # OPTION C: Stoppe bei mehrfachen Nachrichten (User:/Assistant:/System:)
-        # Nutzen: Wenn Modell mehrere Chat-Turns generiert
-        # Risiko: Niedrig - stoppt nur bei klaren Markern
-        # AKTIVIERT: Trimmt Response bei "Human:", "Assistant:", "System:" Markern
-        import re
-        # Trimme bei Markern auch mid-line
-        markers = ['Human:', 'Assistant:', 'System:', 'User:']
-        for marker in markers:
-            if marker in response:
-                # Finde Position des Markers
-                pos = response.find(marker)
-                # Wenn der Marker nicht am Anfang ist (dann ist es kein Fehler, sondern Content)
-                if pos > 10:  # Mindestens 10 Zeichen Content vorher
-                    response = response[:pos].strip()
-                    logger.debug(f"[Clean] Trimmed at marker '{marker}'")
-                    break
-        
-        # OPTION D: Entferne Prompt-Reste (falls Prompt in Response enthalten)
-        # Nutzen: Wenn Tokenizer Prompt nicht korrekt entfernt
-        # Risiko: HOCH - Könnte legitime Response-Teile entfernen die Prompt ähneln
-        # AKTIVIEREN: Entferne die # vor den nächsten Zeilen
-        # if original_prompt:
-        #     prompt_start = original_prompt[:50]
-        #     if prompt_start in response:
-        #         response = response.replace(prompt_start, "").strip()
-        #         logger.debug(f"[Clean] Prompt removed")
-        
-        # OPTION E: Schneide bei doppeltem Zeilenumbruch + Fragewort ab
-        # Nutzen: Wenn Modell nach Antwort neue Fragen generiert
-        # Risiko: MITTEL - Könnte mehrteilige Antworten abschneiden
-        # AKTIVIEREN: Entferne die # vor den nächsten Zeilen
-        # if '\n\n' in response:
-        #     sections = response.split('\n\n')
-        #     if len(sections) > 1:
-        #         second = sections[1].strip().lower()
-        #         if second.startswith(('#', 'wie', 'was', 'user', 'system')):
-        #             response = sections[0].strip()
-        #             logger.debug(f"[Clean] Multiple sections cut at question")
+        # 4. Unicode-Vollbreiten-Ziffern (全角数字) zu ASCII-Ziffern konvertieren
+        # Qwen-Modelle können manchmal Unicode-Vollbreiten-Ziffern generieren
+        fullwidth_to_ascii = {
+            '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+            '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+            '＋': '+', '－': '-', '×': '*', '÷': '/', '＝': '='
+        }
+        for fullwidth, ascii_char in fullwidth_to_ascii.items():
+            response = response.replace(fullwidth, ascii_char)
         
         return response
+    
+    def _clean_structure(self, response: str, messages: List[Dict[str, str]]) -> str:
+        """
+        Phase 2: Struktur-Level Cleaning
+        Entfernt Chat-Marker und schützt Code-Blocks
+        """
+        import re
+        
+        response_before = response
+        
+        # 1. Code-Blocks schützen (temporär ersetzen) - WICHTIG: Multiline Pattern
+        code_block_pattern = r'```[\s\S]*?```'
+        code_blocks = re.findall(code_block_pattern, response)
+        code_block_map = {}
+        for i, code_block in enumerate(code_blocks):
+            placeholder = f"__CODE_BLOCK_{i}__"
+            code_block_map[placeholder] = code_block
+            response = response.replace(code_block, placeholder, 1)
+        
+        # 2. Prüfe ob Response hauptsächlich Code ist (mehr als 50% Code-Blocks)
+        total_code_length = sum(len(cb) for cb in code_blocks)
+        if total_code_length > len(response_before) * 0.5:
+            # Response ist hauptsächlich Code - sehr vorsichtig mit Trimming
+            logger.debug("[Clean] Response ist hauptsächlich Code, verwende konservative Trimming-Strategie")
+            # Nur trimmen wenn Marker sehr weit hinten (>80% der Response)
+            user_markers = ['Human:', 'User:']
+            for marker in user_markers:
+                positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+                for pos in positions:
+                    if pos > len(response) * 0.8:  # Nur wenn sehr weit hinten
+                        response = response[:pos].strip()
+                        logger.debug(f"[Clean] Trimmed at user marker '{marker}' at position {pos} (Code-Response)")
+                        break
+        else:
+            # Normale Response - normale Trimming-Strategie
+            user_markers = ['Human:', 'User:']  # Immer trimmen
+            assistant_markers = ['Assistant:', 'System:']  # Nur trimmen wenn wenig Content
+            
+            # Zuerst: User-Marker (immer trimmen, aber nur wenn genug Content vorher)
+            for marker in user_markers:
+                positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+                for pos in positions:
+                    if pos > 100:  # Mindestens 100 Zeichen vom Anfang (erhöht für Code)
+                        # Prüfe ob vor dem Marker genug Content ist
+                        before_marker = response[:pos].strip()
+                        if len(before_marker) > 50:  # Mindestens 50 Zeichen vor Marker
+                            response = response[:pos].strip()
+                            logger.debug(f"[Clean] Trimmed at user marker '{marker}' at position {pos}")
+                            break
+                if len(response) < len(response_before) * 0.7:  # Nur wenn weniger als 70% übrig
+                    break
+            
+            # Dann: Assistant-Marker (nur wenn wenig Content)
+            for marker in assistant_markers:
+                positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+                for pos in positions:
+                    if pos > 100:  # Mindestens 100 Zeichen vom Anfang
+                        after_marker = response[pos + len(marker):].strip()
+                        # Wenn nach Marker wenig Content ODER keine Buchstaben
+                        if len(after_marker) < 50 or not re.search(r'[a-zA-ZäöüßÄÖÜ]', after_marker[:100]):
+                            response = response[:pos].strip()
+                            logger.debug(f"[Clean] Trimmed at assistant marker '{marker}' at position {pos}")
+                            break
+                if len(response) < len(response_before) * 0.7:  # Nur wenn weniger als 70% übrig
+                    break
+        
+        # 3. Code-Blocks wieder einfügen
+        for placeholder, code_block in code_block_map.items():
+            response = response.replace(placeholder, code_block)
+        
+        return response
+    
+    def _needs_content_cleaning(self, response: str) -> bool:
+        """
+        Prüft ob Content-Level Cleaning nötig ist
+        """
+        import re
+        
+        # Prüfe ob HTML-Tags vorhanden
+        if re.search(r'<[^>]+>', response):
+            return True
+        
+        # Prüfe ob CJK-Zeichen vorhanden (nur wenn Response Buchstaben hat)
+        if re.search(r'[a-zA-ZäöüßÄÖÜ]', response):
+            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf]'
+            if re.search(cjk_pattern, response):
+                return True
+        
+        return False
+    
+    def _clean_content(self, response: str) -> str:
+        """
+        Phase 3: Content-Level Cleaning (OPTIONAL)
+        Entfernt Artefakte ohne Content zu beschädigen
+        WICHTIG: Code-Blocks werden geschützt
+        """
+        import re
+        
+        # 1. Code-Blocks schützen (temporär ersetzen)
+        code_block_pattern = r'```[\s\S]*?```'
+        code_blocks = re.findall(code_block_pattern, response)
+        code_block_map = {}
+        for i, code_block in enumerate(code_blocks):
+            placeholder = f"__CODE_BLOCK_{i}__"
+            code_block_map[placeholder] = code_block
+            response = response.replace(code_block, placeholder, 1)
+        
+        # 2. HTML-Tags entfernen (nur außerhalb Code-Blocks)
+        html_pattern = r'<[^>]+>'
+        response = re.sub(html_pattern, '', response)
+        
+        # 3. CJK-Zeichen entfernen (nur wenn Buchstaben vorhanden UND nicht hauptsächlich Code)
+        # Prüfe ob Response hauptsächlich Code ist
+        total_code_length = sum(len(cb) for cb in code_blocks)
+        is_mostly_code = total_code_length > len(response) * 0.5
+        
+        if re.search(r'[a-zA-ZäöüßÄÖÜ]', response) and not is_mostly_code:
+            # Nur CJK entfernen wenn Response NICHT hauptsächlich Code ist
+            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f\u2b740-\u2b81f\u2b820-\u2ceaf\uf900-\ufaff\u3300-\u33ff\ufe30-\ufe4f\uf900-\ufaff\u2f800-\u2fa1f]+'
+            response = re.sub(cjk_pattern, '', response)
+        
+        # 4. Whitespace normalisieren (nur außerhalb Code-Blocks)
+        # Vorsichtig: Nur mehrfache Leerzeichen in Text, nicht in Code
+        response = re.sub(r' +', ' ', response)  # Mehrfache Leerzeichen
+        response = re.sub(r'\n\s*\n+', '\n\n', response)  # Mehrfache Zeilenumbrüche
+        
+        # 5. Code-Blocks wieder einfügen
+        for placeholder, code_block in code_block_map.items():
+            response = response.replace(placeholder, code_block)
+        
+        return response.strip()
+    
+    def _validate_basic(self, response: str) -> bool:
+        """
+        Basis-Validierung: Prüft ob Response grundsätzlich gültig ist
+        Code-Blocks werden als gültig akzeptiert, auch ohne Buchstaben
+        """
+        import re
+        
+        if not response or len(response.strip()) == 0:
+            return False
+        if len(response.strip()) < 5:
+            return False
+        
+        # Prüfe ob Response Code-Blocks enthält
+        code_block_pattern = r'```[\s\S]*?```'
+        has_code_blocks = bool(re.search(code_block_pattern, response))
+        
+        # Wenn Code-Blocks vorhanden, ist Response gültig (auch ohne Buchstaben)
+        if has_code_blocks:
+            return True
+        
+        # Prüfe ob Response Buchstaben enthält
+        if not re.search(r'[a-zA-ZäöüßÄÖÜ]', response):
+            return False
+        return True
+    
+    def _validate_final(self, response: str) -> bool:
+        """
+        Finale Validierung: Prüft ob Response vollständig und gültig ist
+        Code-Blocks werden als gültig akzeptiert, auch ohne Wörter
+        """
+        import re
+        
+        if not self._validate_basic(response):
+            return False
+        
+        # Prüfe ob Response Code-Blocks enthält
+        code_block_pattern = r'```[\s\S]*?```'
+        has_code_blocks = bool(re.search(code_block_pattern, response))
+        
+        # Wenn Code-Blocks vorhanden, ist Response gültig (auch ohne Wörter)
+        if has_code_blocks:
+            return True
+        
+        # Prüfe ob Response Wörter enthält (nicht nur Sonderzeichen)
+        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]+\b', response)
+        if len(words) == 0:
+            return False
+        
+        return True
+    
+    def _fallback_clean(self, original_response: str) -> str:
+        """
+        Fallback: Minimal Cleaning auf Original
+        WICHTIG: Code-Blocks werden geschützt, nur sicherste Schritte
+        """
+        import re
+        
+        response = original_response
+        
+        # 1. Code-Blocks schützen (temporär ersetzen)
+        code_block_pattern = r'```[\s\S]*?```'
+        code_blocks = re.findall(code_block_pattern, response)
+        code_block_map = {}
+        for i, code_block in enumerate(code_blocks):
+            placeholder = f"__CODE_BLOCK_{i}__"
+            code_block_map[placeholder] = code_block
+            response = response.replace(code_block, placeholder, 1)
+        
+        # 2. Prüfe ob Response hauptsächlich Code ist
+        total_code_length = sum(len(cb) for cb in code_blocks)
+        is_mostly_code = total_code_length > len(original_response) * 0.5
+        
+        # 3. HTML entfernen (nur außerhalb Code-Blocks)
+        html_pattern = r'<[^>]+>'
+        response = re.sub(html_pattern, '', response)
+        
+        # 4. CJK entfernen (NUR wenn NICHT hauptsächlich Code)
+        if re.search(r'[a-zA-ZäöüßÄÖÜ]', response) and not is_mostly_code:
+            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f\u2b740-\u2b81f\u2b820-\u2ceaf\uf900-\ufaff\u3300-\u33ff\ufe30-\ufe4f\uf900-\ufaff\u2f800-\u2fa1f]+'
+            response = re.sub(cjk_pattern, '', response)
+        
+        # 5. Chat-Marker trimmen (nur wenn NICHT hauptsächlich Code ODER sehr weit hinten)
+        if not is_mostly_code:
+            markers = ['Human:', 'Assistant:', 'User:', 'System:']
+            for marker in markers:
+                positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+                for pos in positions:
+                    if pos > 100:  # Mindestens 100 Zeichen vom Anfang
+                        after_marker = response[pos + len(marker):].strip()
+                        if len(after_marker) < 50:  # Wenn nach Marker wenig Content
+                            response = response[:pos].strip()
+                            logger.debug(f"[Clean] Fallback: Trimmed at marker '{marker}'")
+                            break
+        else:
+            # Bei Code-Response: Nur trimmen wenn Marker sehr weit hinten (>90%)
+            markers = ['Human:', 'User:']
+            for marker in markers:
+                positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+                for pos in positions:
+                    if pos > len(response) * 0.9:  # Nur wenn sehr weit hinten
+                        response = response[:pos].strip()
+                        logger.debug(f"[Clean] Fallback: Trimmed at marker '{marker}' (Code-Response)")
+                        break
+        
+        # 6. Code-Blocks wieder einfügen
+        for placeholder, code_block in code_block_map.items():
+            response = response.replace(placeholder, code_block)
+        
+        # 7. Whitespace normalisieren (nur außerhalb Code-Blocks)
+        response = re.sub(r'\n\s*\n+', '\n\n', response)
+        
+        logger.warning(f"[Clean] Fallback verwendet: {len(original_response)} -> {len(response)} Zeichen")
+        return response.strip()
     
     def _generate_internal(self, messages: List[Dict[str, str]], max_length: int = 2048, temperature: float = 0.3, is_coding: bool = False) -> str:
         """
@@ -786,6 +1031,9 @@ class ModelManager:
                 )
                 # Speichere Prompt-Länge für späteren Vergleich
                 original_prompt = prompt
+                # DEBUG: Logge formatierten Prompt (nur für Debugging)
+                logger.debug(f"[DEBUG] Formatierten Prompt (erste 500 Zeichen): {prompt[:500]}")
+                logger.debug(f"[DEBUG] Formatierten Prompt (letzte 200 Zeichen): {prompt[-200:]}")
                 
                 #else:
                 # Fallback für ältere Modelle
@@ -840,11 +1088,84 @@ class ModelManager:
                 model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
                 model_max_context = model_limits.get(model_name, model_limits["default"])
             
+            # FIX: Wenn Input zu lang ist, kürze die Messages automatisch
+            if input_length > max_length:
+                logger.warning(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}. Kürze Messages...")
+                
+                # Versuche, die letzten Messages zu kürzen (behält System-Prompt und erste User-Message)
+                if len(messages) > 2:
+                    # Behalte System-Prompt (wenn vorhanden) und erste User-Message
+                    system_msg = messages[0] if messages[0].get("role") == "system" else None
+                    first_user_msg = None
+                    other_messages = []
+                    
+                    for msg in messages:
+                        if msg.get("role") == "system":
+                            continue  # System wird separat behandelt
+                        elif msg.get("role") == "user" and first_user_msg is None:
+                            first_user_msg = msg
+                        else:
+                            other_messages.append(msg)
+                    
+                    # Kürze andere Messages (entferne älteste zuerst)
+                    while input_length > max_length and len(other_messages) > 0:
+                        removed = other_messages.pop(0)  # Entferne älteste Message
+                        logger.debug(f"Entferne Message aus History: {removed.get('role', 'unknown')}")
+                        
+                        # Rebuild prompt und prüfe Länge
+                        new_messages = []
+                        if system_msg:
+                            new_messages.append(system_msg)
+                        if first_user_msg:
+                            new_messages.append(first_user_msg)
+                        new_messages.extend(other_messages)
+                        
+                        new_prompt = self._format_messages(new_messages)
+                        new_inputs = self.tokenizer(new_prompt, return_tensors="pt")
+                        input_length = new_inputs['input_ids'].shape[1]
+                        
+                        # Update messages und inputs
+                        messages = new_messages
+                        prompt = new_prompt
+                        inputs = new_inputs
+                    
+                    # Wenn immer noch zu lang, kürze die letzte User-Message
+                    if input_length > max_length and first_user_msg:
+                        # Kürze die erste User-Message auf max. 50% der erlaubten Länge
+                        max_user_tokens = max_length // 2
+                        user_content = first_user_msg.get("content", "")
+                        user_inputs = self.tokenizer(user_content, return_tensors="pt")
+                        user_length = user_inputs['input_ids'].shape[1]
+                        
+                        if user_length > max_user_tokens:
+                            # Kürze Text (ungefähr)
+                            ratio = max_user_tokens / user_length
+                            new_user_content = user_content[:int(len(user_content) * ratio * 0.9)]  # 90% Sicherheitsmarge
+                            first_user_msg["content"] = new_user_content
+                            logger.warning(f"User-Message gekürzt von {user_length} auf ~{max_user_tokens} Tokens")
+                            
+                            # Rebuild prompt
+                            new_messages = []
+                            if system_msg:
+                                new_messages.append(system_msg)
+                            new_messages.append(first_user_msg)
+                            new_messages.extend(other_messages)
+                            
+                            prompt = self._format_messages(new_messages)
+                            inputs = self.tokenizer(prompt, return_tensors="pt")
+                            input_length = inputs['input_ids'].shape[1]
+                            messages = new_messages
+                    
+                    logger.info(f"Messages gekürzt. Neue Input-Länge: {input_length} Tokens")
+                else:
+                    # Nur 1-2 Messages - kann nicht gekürzt werden
+                    raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}. Bitte kürze deine Nachricht.")
+            
             # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
+            # WICHTIG: Verwende max_length direkt (ohne hartes Limit), damit User-Einstellungen respektiert werden
             max_new_tokens = min(
-                max_length - input_length,  # Verfügbarer Platz basierend auf max_length
-                model_max_context - input_length,  # Verfügbarer Platz basierend auf Modell-Limit
-                2048  # Sicherheits-Limit (verhindert zu große Generierungen)
+                max_length - input_length,  # Verfügbarer Platz basierend auf max_length (User-Einstellung)
+                model_max_context - input_length  # Verfügbarer Platz basierend auf Modell-Limit
             )
             
             # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
@@ -925,7 +1246,15 @@ class ModelManager:
                         except:
                             pass
                 
-                repetition_penalty = 1.1 if is_coding else (1.3 if is_mistral else 1.2)
+                # Optimierte Repetition Penalty für verschiedene Use Cases
+                if is_coding:
+                    repetition_penalty = 1.1  # Niedriger für Code (erlaubt Wiederholungen)
+                elif is_mistral:
+                    repetition_penalty = 1.3  # Höher für Mistral (verhindert Loops)
+                elif is_qwen:
+                    repetition_penalty = 1.15  # Mittel für Qwen (ausgewogen)
+                else:
+                    repetition_penalty = 1.2  # Standard
                 
                 # Für Qwen: Liste beibehalten (model.generate() unterstützt Listen)
                 # Für andere Modelle: Single Integer verwenden
@@ -985,13 +1314,26 @@ class ModelManager:
                 heartbeat_thread.start()
                 
                 try:
+                    # Optimierte Parameter für Qwen
+                    if is_qwen:
+                        # Qwen: Verwende moderate Temperature für bessere Qualität
+                        effective_temperature = max(0.3, temperature) if temperature > 0 else 0.7
+                        effective_top_p = 0.9
+                        effective_top_k = None  # Qwen funktioniert besser ohne top_k
+                    else:
+                        effective_temperature = temperature if temperature > 0 else (0.7 if is_mistral else None)
+                        effective_top_p = 0.9 if temperature > 0 else None
+                        effective_top_k = 50 if temperature > 0 and is_mistral else None
+                    
+                    logger.debug(f"[DEBUG] Generate-Parameter: temp={effective_temperature}, top_p={effective_top_p}, top_k={effective_top_k}, rep_penalty={repetition_penalty}")
+                    
                     outputs = self.model.generate(
                         **inputs,
                         max_new_tokens=max_new_tokens,
-                        temperature=temperature if temperature > 0 else (0.7 if is_mistral else None),
-                        do_sample=temperature > 0,
-                        top_p=0.9 if temperature > 0 else None,
-                        top_k=50 if temperature > 0 and is_mistral else None,  # Top-k für Mistral
+                        temperature=effective_temperature,
+                        do_sample=effective_temperature is not None and effective_temperature > 0,
+                        top_p=effective_top_p,
+                        top_k=effective_top_k,
                         repetition_penalty=repetition_penalty,
                         pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
                         eos_token_id=eos_token_id_for_generate,  # Kann jetzt Liste oder Integer sein
@@ -1058,20 +1400,38 @@ class ModelManager:
                 # Schneide beim ersten EOS-Token ab
                 if eos_positions:
                     new_tokens = new_tokens[:min(eos_positions)]
+                else:
+                    # WARNUNG: Kein EOS-Token gefunden - könnte Problem sein
+                    logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Response könnte unvollständig sein.")
                 
                 decode_start_time = time.time()
-                response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                response = self.tokenizer.decode(new_tokens, skip_special_tokens=False)  # WICHTIG: skip_special_tokens=False um alle Tokens zu sehen
                 decode_duration = time.time() - decode_start_time
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
+                logger.warning(f"[DEBUG] RAW RESPONSE (vollständig): {repr(response)}")  # WICHTIG: Vollständige Raw-Response für Debugging
+                
+                # Prüfe ob Response nur Sonderzeichen enthält
+                import re
+                has_letters = bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response))
+                if not has_letters and len(response.strip()) < 20:
+                    logger.error(f"[ERROR] Response enthält keine Buchstaben! Nur Sonderzeichen: {repr(response)}")
+                    # Versuche mit skip_special_tokens=True
+                    response_alt = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                    logger.warning(f"[DEBUG] Alternative Decodierung (skip_special_tokens=True): {repr(response_alt)}")
+                    if bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response_alt)):
+                        response = response_alt
+                        logger.info(f"[FIX] Alternative Decodierung hat Buchstaben gefunden, verwende diese")
                 logger.debug(f"[DEBUG] Decoding dauerte {decode_duration:.2f} Sekunden")
                 logger.model_gen(f"Decoding abgeschlossen, Länge: {len(response)} Zeichen", level="debug")
                 
                 # 🔧 NEUE MINIMALISTISCHE BEREINIGUNG
                 clean_start_time = time.time()
                 logger.model_gen(f"Vor Cleaning: {len(response)} Zeichen", level="debug")
+                logger.warning(f"[DEBUG] VOR CLEANING (vollständig): {repr(response)}")  # WICHTIG: Response vor Cleaning
                 response = self._clean_response_minimal(response, messages, original_prompt)
                 clean_duration = time.time() - clean_start_time
                 logger.debug(f"[DEBUG] Cleaning dauerte {clean_duration:.2f} Sekunden")
+                logger.warning(f"[DEBUG] NACH CLEANING (vollständig): {repr(response)}")  # WICHTIG: Response nach Cleaning
                 logger.model_gen(f"Nach Cleaning: {len(response)} Zeichen, Response: {response[:100]}...", level="debug")
             
                 total_duration = time.time() - generate_start_time
@@ -1159,10 +1519,10 @@ class ModelManager:
             model_max_context = model_limits.get(model_name, model_limits["default"])
             
             # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
+            # WICHTIG: Verwende max_length direkt (ohne hartes Limit), damit User-Einstellungen respektiert werden
             max_new_tokens = min(
-                max_length - input_length,  # Verfügbarer Platz basierend auf max_length
-                model_max_context - input_length,  # Verfügbarer Platz basierend auf Modell-Limit
-                2048  # Sicherheits-Limit (verhindert zu große Generierungen)
+                max_length - input_length,  # Verfügbarer Platz basierend auf max_length (User-Einstellung)
+                model_max_context - input_length  # Verfügbarer Platz basierend auf Modell-Limit
             )
             
             # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
