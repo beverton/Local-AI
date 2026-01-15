@@ -2,16 +2,18 @@
   "profiles": {
     "default": {
       "name": "Standard",
-      "description": "Standard-Verhalten für allgemeine Anfragen (Chat, Fragen, etc.)",
+      "description": "Standard-Verhalten für allgemeine Anfragen (Chat, Fragen, etc.) - optimiert für schnelle Antworten",
       "parameters": {
-        "temperature": 0.3,
-        "max_length": 512,
-        "repetition_penalty": 1.15,
-        "top_p": 0.9,
-        "top_k": null,
+        "temperature": 0.2,
+        "max_length": 256,
+        "repetition_penalty": 1.1,
+        "top_p": 0.85,
+        "top_k": 50,
         "is_coding": false
       },
-      "system_prompt_modifications": {}
+      "system_prompt_modifications": {
+        "qwen": "Du bist ein hilfreicher Assistent. Antworte kurz und präzise. Für einfache Fragen (z.B. Rechenaufgaben) gib direkt die Antwort ohne lange Erklärungen. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."
+      }
     },
     "coding": {
       "name": "Coding",

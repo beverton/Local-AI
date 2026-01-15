@@ -1401,11 +1401,46 @@ class ModelManager:
                 if eos_positions:
                     new_tokens = new_tokens[:min(eos_positions)]
                 else:
-                    # WARNUNG: Kein EOS-Token gefunden - könnte Problem sein
-                    logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Response könnte unvollständig sein.")
+                    # WARNUNG: Kein EOS-Token gefunden - schneide nach ersten vollständigen Sätzen ab
+                    logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Schneide nach ersten vollständigen Sätzen ab.")
+                    # Dekodiere temporär, um Satzenden zu finden
+                    temp_response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+                    import re
+                    
+                    # Finde erste vollständige Sätze (endet mit Punkt, Ausrufezeichen oder Fragezeichen)
+                    # Suche nach Satzenden gefolgt von Leerzeichen oder Zeilenumbruch
+                    sentence_pattern = r'[.!?][\s\n]+'
+                    sentence_matches = list(re.finditer(sentence_pattern, temp_response))
+                    
+                    if len(sentence_matches) >= 2:
+                        # Verwende ersten 2 vollständigen Sätze
+                        cut_pos = sentence_matches[1].end()
+                        cut_text = temp_response[:cut_pos].strip()
+                        
+                        # Re-encode um exakte Token-Position zu finden
+                        cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
+                        if len(cut_tokens) < len(new_tokens):
+                            new_tokens = new_tokens[:len(cut_tokens)]
+                            logger.info(f"[FIX] Response nach ersten 2 Sätzen abgeschnitten: {len(new_tokens)} Tokens")
+                    elif len(sentence_matches) >= 1:
+                        # Verwende ersten vollständigen Satz
+                        cut_pos = sentence_matches[0].end()
+                        cut_text = temp_response[:cut_pos].strip()
+                        
+                        # Re-encode um exakte Token-Position zu finden
+                        cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
+                        if len(cut_tokens) < len(new_tokens):
+                            new_tokens = new_tokens[:len(cut_tokens)]
+                            logger.info(f"[FIX] Response nach erstem Satz abgeschnitten: {len(new_tokens)} Tokens")
+                    else:
+                        # Keine Satzenden gefunden - schneide nach ersten 50 Tokens ab (für sehr kurze Antworten)
+                        if len(new_tokens) > 50:
+                            new_tokens = new_tokens[:50]
+                            logger.warning(f"[FIX] Keine Satzenden gefunden, schneide nach 50 Tokens ab")
                 
                 decode_start_time = time.time()
-                response = self.tokenizer.decode(new_tokens, skip_special_tokens=False)  # WICHTIG: skip_special_tokens=False um alle Tokens zu sehen
+                # WICHTIG: Verwende skip_special_tokens=True standardmäßig, um korrekte Dekodierung zu gewährleisten
+                response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                 decode_duration = time.time() - decode_start_time
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
                 logger.warning(f"[DEBUG] RAW RESPONSE (vollständig): {repr(response)}")  # WICHTIG: Vollständige Raw-Response für Debugging
@@ -1413,14 +1448,14 @@ class ModelManager:
                 # Prüfe ob Response nur Sonderzeichen enthält
                 import re
                 has_letters = bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response))
-                if not has_letters and len(response.strip()) < 20:
-                    logger.error(f"[ERROR] Response enthält keine Buchstaben! Nur Sonderzeichen: {repr(response)}")
-                    # Versuche mit skip_special_tokens=True
-                    response_alt = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
-                    logger.warning(f"[DEBUG] Alternative Decodierung (skip_special_tokens=True): {repr(response_alt)}")
-                    if bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response_alt)):
+                if not has_letters or len(response.strip()) < 5:
+                    logger.warning(f"[WARNING] Response enthält keine Buchstaben oder ist zu kurz! Response: {repr(response)}")
+                    # Versuche mit skip_special_tokens=False als Fallback
+                    response_alt = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
+                    logger.warning(f"[DEBUG] Alternative Decodierung (skip_special_tokens=False): {repr(response_alt)}")
+                    if bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response_alt)) and len(response_alt.strip()) >= 5:
                         response = response_alt
-                        logger.info(f"[FIX] Alternative Decodierung hat Buchstaben gefunden, verwende diese")
+                        logger.info(f"[FIX] Alternative Decodierung hat bessere Response gefunden, verwende diese")
                 logger.debug(f"[DEBUG] Decoding dauerte {decode_duration:.2f} Sekunden")
                 logger.model_gen(f"Decoding abgeschlossen, Länge: {len(response)} Zeichen", level="debug")
                 
