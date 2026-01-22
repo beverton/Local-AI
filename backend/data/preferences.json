@@ -1,9 +1,11 @@
 {
   "enabled": true,
-  "style_preferences": {},
+  "style_preferences": {
+    "brief": true
+  },
   "topic_preferences": {
-    "coding": 13
+    "coding": 39
   },
   "format_preferences": {},
-  "system_prompt_additions": "Der Nutzer interessiert sich besonders für Programmierung."
+  "system_prompt_additions": "Antworte kurz und prägnant. Der Nutzer interessiert sich besonders für Programmierung."
 }

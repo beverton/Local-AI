@@ -33,7 +33,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Max Length Settings werden in loadMCPSettings() geladen (nachdem Settings-Sektion angezeigt wurde)
     const maxLengthSlider = document.getElementById('maxLengthSlider');
     const maxLengthValue = document.getElementById('maxLengthValue');
-    const btnSaveMaxLength = document.getElementById('btnSaveMaxLength');
+    const temperatureSlider = document.getElementById('temperatureSlider');
+    const temperatureValue = document.getElementById('temperatureValue');
+    const btnSaveSettings = document.getElementById('btnSaveSettings');
     
     if (maxLengthSlider && maxLengthValue) {
         maxLengthSlider.addEventListener('input', (e) => {
@@ -41,9 +43,15 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     
-    if (btnSaveMaxLength) {
-        btnSaveMaxLength.addEventListener('click', async () => {
-            await saveMaxLengthSettings();
+    if (temperatureSlider && temperatureValue) {
+        temperatureSlider.addEventListener('input', (e) => {
+            temperatureValue.textContent = parseFloat(e.target.value).toFixed(1);
+        });
+    }
+    
+    if (btnSaveSettings) {
+        btnSaveSettings.addEventListener('click', async () => {
+            await saveAllSettings();
         });
     }
     
@@ -116,8 +124,9 @@ async function loadMCPSettings() {
         
         if (settingsSection) {
             settingsSection.style.display = 'block';
-            // Lade max_length Settings nachdem Settings-Sektion angezeigt wurde
+            // Lade Settings nachdem Settings-Sektion angezeigt wurde
             await loadMaxLengthSettings();
+            await loadTemperatureSettings();
         }
     } catch (error) {
         console.error('Fehler beim Laden der MCP-Einstellungen:', error);
@@ -125,8 +134,9 @@ async function loadMCPSettings() {
         const settingsSection = document.getElementById('settingsSection');
         if (settingsSection) {
             settingsSection.style.display = 'block';
-            // Versuche trotzdem max_length Settings zu laden
+            // Versuche trotzdem Settings zu laden
             await loadMaxLengthSettings();
+            await loadTemperatureSettings();
         }
     }
 }
@@ -155,6 +165,28 @@ async function loadMaxLengthSettings() {
     }
 }
 
+async function loadTemperatureSettings() {
+    try {
+        const response = await fetch(`${API_BASE}/settings/temperature`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const temperatureSlider = document.getElementById('temperatureSlider');
+        const temperatureValue = document.getElementById('temperatureValue');
+        
+        if (temperatureSlider && temperatureValue) {
+            temperatureSlider.min = data.min;
+            temperatureSlider.max = data.max;
+            temperatureSlider.value = data.temperature;
+            temperatureValue.textContent = parseFloat(data.temperature).toFixed(1);
+        }
+    } catch (error) {
+        console.error('Fehler beim Laden der temperature Settings:', error);
+    }
+}
+
 async function saveMaxLengthSettings() {
     const maxLengthSlider = document.getElementById('maxLengthSlider');
     if (!maxLengthSlider) {
@@ -178,15 +210,61 @@ async function saveMaxLengthSettings() {
         }
         
         const data = await response.json();
-        alert(`Max. Länge erfolgreich auf ${data.max_length} gesetzt!`);
-        
-        // Aktualisiere UI
-        const maxLengthValue = document.getElementById('maxLengthValue');
-        if (maxLengthValue) {
-            maxLengthValue.textContent = data.max_length;
-        }
+        console.log('max_length Setting gespeichert:', data);
+        return data;
     } catch (error) {
         console.error('Fehler beim Speichern der max_length Settings:', error);
+        throw error;
+    }
+}
+
+async function saveTemperatureSettings() {
+    const temperatureSlider = document.getElementById('temperatureSlider');
+    if (!temperatureSlider) {
+        return;
+    }
+    
+    const temperature = parseFloat(temperatureSlider.value);
+    
+    try {
+        const response = await fetch(`${API_BASE}/settings/temperature`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ temperature: temperature })
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        
+        const data = await response.json();
+        console.log('temperature Setting gespeichert:', data);
+        return data;
+    } catch (error) {
+        console.error('Fehler beim Speichern der temperature Settings:', error);
+        throw error;
+    }
+}
+
+async function saveAllSettings() {
+    try {
+        // Speichere beide Settings parallel
+        await Promise.all([
+            saveMaxLengthSettings(),
+            saveTemperatureSettings()
+        ]);
+        
+        // Zeige Bestätigung
+        const maxLengthSlider = document.getElementById('maxLengthSlider');
+        const temperatureSlider = document.getElementById('temperatureSlider');
+        const maxLength = parseInt(maxLengthSlider.value);
+        const temperature = parseFloat(temperatureSlider.value).toFixed(1);
+        
+        alert(`Einstellungen erfolgreich gespeichert!\n- Länge: ${maxLength}\n- Temperature: ${temperature}`);
+    } catch (error) {
         alert(`Fehler beim Speichern: ${error.message}`);
     }
 }

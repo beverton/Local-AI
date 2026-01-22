@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-01-15T11:10:22.083854",
+  "base_url": "http://127.0.0.1:8000",
+  "conversation_id": "5dbacb44-cd40-4807-a7db-083e70f49d84",
+  "request_timeout_seconds": 60,
+  "max_run_seconds": 300,
+  "tests": [
+    {
+      "id": "short_ok",
+      "error": "500 Server Error: Internal Server Error for url: http://127.0.0.1:8000/chat"
+    },
+    {
+      "id": "file_write_short",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "simple_points",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "medium_explain",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "long_structured",
+      "error": "('Connection aborted.', ConnectionResetError(10054, 'Eine vorhandene Verbindung wurde vom Remotehost geschlossen', None, 10054, None))"
+    }
+  ],
+  "conversation_file": "G:\\04-CODING\\Local Ai\\data\\conversations\\5dbacb44-cd40-4807-a7db-083e70f49d84.json"
+}

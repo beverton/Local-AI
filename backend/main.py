@@ -341,6 +341,12 @@ class ChatRequest(BaseModel):
 class SetConversationModelRequest(BaseModel):
     model_id: Optional[str] = None
 
+class UpdateConversationTitleRequest(BaseModel):
+    title: str
+
+class DeleteConversationsRequest(BaseModel):
+    conversation_ids: List[str]
+
 
 class ChatResponse(BaseModel):
     response: str
@@ -378,6 +384,8 @@ class PerformanceSettingsRequest(BaseModel):
     use_flash_attention: Optional[bool] = None
     enable_tf32: Optional[bool] = None
     enable_cudnn_benchmark: Optional[bool] = None
+    gpu_max_percent: Optional[float] = None  # Maximum GPU usage percentage (default 90)
+    primary_budget_percent: Optional[float] = None  # Primary model budget percentage (auto-calculated if None)
 
 
 class PerformanceSettingsResponse(BaseModel):
@@ -390,6 +398,8 @@ class PerformanceSettingsResponse(BaseModel):
     use_flash_attention: bool
     enable_tf32: bool
     enable_cudnn_benchmark: bool
+    gpu_max_percent: float
+    primary_budget_percent: Optional[float]
 
 
 class AudioSettingsRequest(BaseModel):
@@ -501,19 +511,22 @@ async def get_system_stats():
                     values = result.stdout.strip().split(',')
                     stats["gpu_memory_used_mb"] = float(values[0].strip())
                     stats["gpu_memory_total_mb"] = float(values[1].strip())
-                    stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
+                    raw_percent = (stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100 if stats["gpu_memory_total_mb"] > 0 else 0
+                    stats["gpu_memory_percent"] = min(100.0, round(raw_percent, 1))
                     stats["gpu_utilization"] = int(values[2].strip())
                 else:
                     # Fallback auf PyTorch (ungenau)
                     stats["gpu_memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**2), 0)
                     stats["gpu_memory_used_mb"] = round(torch.cuda.memory_reserved(0) / (1024**2), 0)  # memory_reserved statt memory_allocated
-                    stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
+                    raw_percent = (stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100 if stats["gpu_memory_total_mb"] > 0 else 0
+                    stats["gpu_memory_percent"] = min(100.0, round(raw_percent, 1))
             except Exception as smi_error:
                 # Fallback auf PyTorch (ungenau)
                 logger.debug(f"nvidia-smi nicht verfügbar, verwende PyTorch-Messung: {smi_error}")
                 stats["gpu_memory_total_mb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**2), 0)
                 stats["gpu_memory_used_mb"] = round(torch.cuda.memory_reserved(0) / (1024**2), 0)  # memory_reserved statt memory_allocated
-                stats["gpu_memory_percent"] = round((stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100, 1) if stats["gpu_memory_total_mb"] > 0 else 0
+                raw_percent = (stats["gpu_memory_used_mb"] / stats["gpu_memory_total_mb"]) * 100 if stats["gpu_memory_total_mb"] > 0 else 0
+                stats["gpu_memory_percent"] = min(100.0, round(raw_percent, 1))
         except Exception as e:
             logger.warning(f"Fehler beim Abrufen der GPU-Informationen: {e}")
     
@@ -845,6 +858,11 @@ async def chat_stream(request: ChatRequest):
                         )
                         chat_agent = agent_manager.get_agent(conversation_id, agent_id)
                     
+                    # Setze ChatAgent-Parameter für konsistente Token-Budgets
+                    effective_temperature = request.temperature if request.temperature > 0 else 0.3
+                    chat_agent.config["max_length"] = request.max_length
+                    chat_agent.config["temperature"] = effective_temperature
+                    
                     # Nutze ChatAgent für Antwort-Generierung (mit Tools/Web-Search)
                     response = chat_agent.process_message(request.message)
                     
@@ -1020,6 +1038,10 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             }
         )
     
+    # Coding-Detection für ChatAgent und Fallback
+    is_coding = quality_manager.is_coding_question(request.message)
+    logger.debug(f"[UseCase] Coding Detection: is_coding={is_coding} für Nachricht: '{request.message[:100]}...'")
+    
     # IMMER ChatAgent verwenden - alle Chats sind jetzt Agenten mit Tool-Unterstützung
     # ChatAgent erkennt automatisch Tool-Bedarf (WebSearch, Datei-Operationen, etc.)
     try:
@@ -1090,6 +1112,17 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 set_managers_func=set_agent_managers
             )
             chat_agent = agent_manager.get_agent(conversation_id, agent_id)
+        
+        # Setze ChatAgent-Parameter für konsistente Token-Budgets
+        current_model = model_to_use
+        if current_model and "qwen" in current_model.lower() and is_coding:
+            effective_temperature = request.temperature if request.temperature > 0 else 0.2
+            effective_max_length = max(request.max_length, 4096)
+        else:
+            effective_temperature = request.temperature if request.temperature > 0 else 0.3
+            effective_max_length = request.max_length
+        chat_agent.config["max_length"] = effective_max_length
+        chat_agent.config["temperature"] = effective_temperature
         
         # Nutze ChatAgent für Antwort-Generierung (mit RAG-Kontext wenn vorhanden)
         logger.chat(f"Starte Antwort-Generierung mit ChatAgent (enhanced_message_length={len(enhanced_message)})")
@@ -1236,10 +1269,6 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     # da bei USE_MODEL_SERVICE das Modell im Model-Service läuft, nicht lokal
     current_model = model_to_use  # Verwende bereits bestimmtes Modell
     
-    # Prüfe ob Frage Coding-bezogen ist
-    is_coding = quality_manager.is_coding_question(request.message)
-    logger.debug(f"[UseCase] Coding Detection: is_coding={is_coding} für Nachricht: '{request.message[:100]}...'")
-    
     # Generiere System-Prompt basierend auf Sprache und Modell
     if current_model and "phi-3" in current_model.lower():
         # Phi-3 verwendet ChatML-Format, kein separater System-Prompt nötig
@@ -1253,20 +1282,25 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         system_prompt = preference_learner.get_system_prompt(system_prompt)
     elif current_model and "qwen" in current_model.lower():
         # Qwen: Hybrid-Prompt (kann chatten UND coden)
+        # Prüfe ob Web-Search aktiviert ist
+        web_search_enabled = quality_manager.settings.get("auto_web_search", False)
+        
         if response_language == "en":
-            system_prompt = """You are a helpful AI assistant who can both answer questions and write code.
+            web_search_warning = "\n\nIMPORTANT: Do NOT generate URLs or links. Web search is disabled." if not web_search_enabled else ""
+            system_prompt = f"""You are a helpful AI assistant who can both answer questions and write code.
 - For questions: Answer clearly and directly
 - For code requests: Use Markdown code blocks with language tags (```python, ```javascript, etc.)
 - Only use code blocks when code is requested
 - Include helpful comments in code when appropriate
-- Explain code briefly if needed"""
+- Explain code briefly if needed{web_search_warning}"""
         else:  # Deutsch (de) oder andere
-            system_prompt = """Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+            web_search_warning = "\n\nWICHTIG: Generiere KEINE URLs oder Links. Web-Suche ist deaktiviert." if not web_search_enabled else ""
+            system_prompt = f"""Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
 - Bei Fragen: Antworte klar und direkt
 - Bei Code-Anfragen: Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
 - Verwende Code-Blocks nur wenn Code gefragt ist
 - Füge hilfreiche Kommentare in Code hinzu wenn angemessen
-- Erkläre Code kurz wenn nötig"""
+- Erkläre Code kurz wenn nötig{web_search_warning}"""
         system_prompt = preference_learner.get_system_prompt(system_prompt)
     else:
         # Andere Modelle: Sprachspezifischer Prompt
@@ -1622,6 +1656,24 @@ async def get_conversations():
     return {"conversations": conversation_manager.get_all_conversations()}
 
 
+@app.post("/conversations/delete-multiple")
+async def delete_multiple_conversations(request: DeleteConversationsRequest):
+    """Löscht mehrere Conversations"""
+    results = conversation_manager.delete_multiple_conversations(request.conversation_ids)
+    successful = [cid for cid, success in results.items() if success]
+    failed = [cid for cid, success in results.items() if not success]
+    
+    # Erlaube teilweise erfolgreiche Löschungen
+    if successful:
+        message = f"{len(successful)} von {len(request.conversation_ids)} Conversations erfolgreich gelöscht"
+        if failed:
+            message += f", {len(failed)} konnten nicht gelöscht werden"
+        return {"message": message, "successful": successful, "failed": failed, "results": results}
+    else:
+        # Nur wenn ALLE fehlgeschlagen sind, werfe einen Fehler
+        raise HTTPException(status_code=404, detail=f"Keine Conversations konnten gelöscht werden: {failed}")
+
+
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
     """Lädt eine spezifische Conversation"""
@@ -1702,6 +1754,15 @@ async def delete_conversation(conversation_id: str):
     if not success:
         raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
     return {"message": "Conversation gelöscht"}
+
+
+@app.patch("/conversations/{conversation_id}/title")
+async def update_conversation_title(conversation_id: str, request: UpdateConversationTitleRequest):
+    """Aktualisiert den Titel einer Conversation"""
+    success = conversation_manager.update_conversation_title(conversation_id, request.title)
+    if not success:
+        raise HTTPException(status_code=404, detail="Conversation nicht gefunden")
+    return {"message": "Titel aktualisiert", "title": request.title}
 
 
 @app.post("/conversations/{conversation_id}/model")
@@ -2003,32 +2064,12 @@ async def update_quality_settings(request: QualitySettingsRequest):
 PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
 AUDIO_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "audio_settings.json")
 
+# Import zentrales Settings-Loader-Modul
+from settings_loader import load_performance_settings
+
 def _load_performance_settings() -> Dict[str, Any]:
-    """Lädt Performance-Einstellungen"""
-    # Default-Werte
-    default_settings = {
-        "cpu_threads": None,  # None = Auto
-        "gpu_optimization": "balanced",
-        "disable_cpu_offload": False,
-        "use_torch_compile": False,
-        "use_quantization": False,
-        "quantization_bits": 8,
-        "use_flash_attention": True,
-        "enable_tf32": True,
-        "enable_cudnn_benchmark": True
-    }
-    
-    try:
-        if os.path.exists(PERFORMANCE_SETTINGS_FILE):
-            with open(PERFORMANCE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                loaded_settings = json.load(f)
-                # Merge mit Defaults (für neue Optionen)
-                default_settings.update(loaded_settings)
-                return default_settings
-    except Exception as e:
-        logger.warning(f"Fehler beim Laden der Performance-Einstellungen: {e}")
-    
-    return default_settings
+    """Lädt Performance-Einstellungen (delegiert an zentrales Modul)"""
+    return load_performance_settings()
 
 def _save_performance_settings(settings: Dict[str, Any]):
     """Speichert Performance-Einstellungen"""
@@ -2043,6 +2084,11 @@ def _save_performance_settings(settings: Dict[str, Any]):
 async def get_performance_settings():
     """Gibt die aktuellen Performance-Einstellungen zurück"""
     settings = _load_performance_settings()
+    # Ensure all required fields are present with defaults
+    if "gpu_max_percent" not in settings:
+        settings["gpu_max_percent"] = 90.0
+    if "primary_budget_percent" not in settings:
+        settings["primary_budget_percent"] = None
     return PerformanceSettingsResponse(**settings)
 
 @app.post("/performance/settings", response_model=PerformanceSettingsResponse)
@@ -2052,6 +2098,16 @@ async def set_performance_settings(request: PerformanceSettingsRequest):
     current_settings = _load_performance_settings()
     
     # Aktualisiere nur gesetzte Werte
+    # GPU allocation validation
+    gpu_max = request.gpu_max_percent if request.gpu_max_percent is not None else current_settings.get("gpu_max_percent", 90.0)
+    primary_budget = request.primary_budget_percent if request.primary_budget_percent is not None else current_settings.get("primary_budget_percent")
+    
+    # Validate GPU settings
+    if gpu_max < 0 or gpu_max > 100:
+        raise HTTPException(status_code=400, detail="gpu_max_percent must be between 0 and 100")
+    if primary_budget is not None and (primary_budget < 0 or primary_budget > gpu_max):
+        raise HTTPException(status_code=400, detail=f"primary_budget_percent must be between 0 and {gpu_max}")
+    
     settings = {
         "cpu_threads": request.cpu_threads if request.cpu_threads is not None else current_settings.get("cpu_threads"),
         "gpu_optimization": request.gpu_optimization if request.gpu_optimization else current_settings.get("gpu_optimization", "balanced"),
@@ -2061,7 +2117,9 @@ async def set_performance_settings(request: PerformanceSettingsRequest):
         "quantization_bits": request.quantization_bits if request.quantization_bits is not None else current_settings.get("quantization_bits", 8),
         "use_flash_attention": request.use_flash_attention if request.use_flash_attention is not None else current_settings.get("use_flash_attention", True),
         "enable_tf32": request.enable_tf32 if request.enable_tf32 is not None else current_settings.get("enable_tf32", True),
-        "enable_cudnn_benchmark": request.enable_cudnn_benchmark if request.enable_cudnn_benchmark is not None else current_settings.get("enable_cudnn_benchmark", True)
+        "enable_cudnn_benchmark": request.enable_cudnn_benchmark if request.enable_cudnn_benchmark is not None else current_settings.get("enable_cudnn_benchmark", True),
+        "gpu_max_percent": gpu_max,
+        "primary_budget_percent": primary_budget
     }
     _save_performance_settings(settings)
     

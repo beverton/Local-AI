@@ -51,6 +51,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
             Dict mit "tool_name" und "params" oder None
         """
         message_lower = message.lower()
+        message_original = message
         
         # WebSearch Patterns - mit verbesserter Erkennung
         # WICHTIG: Patterns die mit Fragen beginnen haben Priorität (wer/was/wo/wann/wie)
@@ -97,12 +98,21 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
                     return {"tool_name": "web_search", "params": {"query": query}}
         
         # Datei-Operation Patterns
-        # read_file
+        # read_file - Erweiterte Patterns für natürlichere Formulierungen
         read_patterns = [
             r"lese\s+(?:die\s+)?(?:datei\s+)?(.+)",
             r"zeige\s+(?:mir\s+)?(?:den\s+)?(?:inhalt\s+)?(?:der\s+)?(?:datei\s+)?(.+)",
             r"öffne\s+(?:die\s+)?(?:datei\s+)?(.+)",
             r"was\s+steht\s+in\s+(?:der\s+)?(?:datei\s+)?(.+)",
+            # Erweiterte natürliche Formulierungen
+            r"(?:nachschauen|nachschaue|nachschau)\s+(?:in|bei|im|in der|in das)\s+(?:die\s+)?(?:datei\s+)?(.+)",
+            r"(?:prüfe|prüf|prüfen)\s+(?:die\s+)?(?:datei\s+)?(.+)",
+            r"(?:analysiere|analysier|analysieren)\s+(?:die\s+)?(?:datei\s+)?(.+)",
+            r"(?:untersuche|untersuchen)\s+(?:die\s+)?(?:datei\s+)?(.+)",
+            r"(?:schaue|schau|schauen)\s+(?:in|in die|in das|in der)\s+(?:die\s+)?(?:datei\s+)?(.+)",
+            r"(?:zeige|zeig|zeigen)\s+(?:mir\s+)?(?:den\s+)?(?:code|inhalt|text)\s+(?:von|in|der|die|das)\s+(?:datei\s+)?(.+)",
+            r"(?:kannst\s+du|kann\s+du|können\s+sie|können\s+du)\s+(?:in|bei|im|in der|in das)\s+(?:die\s+)?(?:datei\s+)?(.+?)(?:\s+nachschauen|\s+prüfen|\s+analysieren|\s+untersuchen)?",
+            r"(?:kannst\s+du|kann\s+du)\s+(?:nachschauen|prüfen|analysieren|untersuchen)\s+(?:in|bei|im|in der|in das)\s+(?:die\s+)?(?:datei\s+)?(.+)",
         ]
         for pattern in read_patterns:
             match = re.search(pattern, message_lower)
@@ -119,7 +129,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
             r"speichere\s+(?:in\s+)?(?:die\s+)?(?:datei\s+)?(.+?)\s+(?:den\s+)?(?:inhalt\s+)?(.+)",
         ]
         for pattern in write_patterns:
-            match = re.search(pattern, message_lower)
+            match = re.search(pattern, message_original, flags=re.IGNORECASE)
             if match:
                 file_path = match.group(1).strip().strip('"\'')
                 content = match.group(2).strip()
@@ -166,6 +176,45 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         
         return None
     
+    def _is_tool_enabled(self, tool_name: str) -> bool:
+        """
+        Prüft ob ein Tool durch UI-Toggle aktiviert ist
+        
+        Args:
+            tool_name: Name des Tools (z.B. "web_search", "read_file")
+            
+        Returns:
+            True wenn Tool aktiviert ist, False sonst
+        """
+        try:
+            # Lade Quality-Settings
+            import os
+            import json
+            quality_settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "quality_settings.json")
+            if os.path.exists(quality_settings_path):
+                with open(quality_settings_path, 'r', encoding='utf-8') as f:
+                    quality_settings = json.load(f)
+                    
+                    # Web-Search hat eigenen Toggle
+                    if tool_name == "web_search":
+                        return quality_settings.get("auto_web_search", False)
+                    
+                    # Datei-Tools: Prüfe ob allgemeiner Toggle existiert (aktuell: immer erlaubt)
+                    # TODO: Wenn später ein allgemeiner Toggle für Datei-Tools hinzugefügt wird, hier prüfen
+                    if tool_name in ["read_file", "write_file", "list_directory", "delete_file", "file_exists"]:
+                        # Aktuell: Datei-Tools sind immer erlaubt (kein Toggle vorhanden)
+                        return True
+                    
+                    # Unbekanntes Tool: nicht erlauben
+                    return False
+        except Exception as e:
+            logger.debug(f"Fehler beim Laden der Quality-Settings für Tool-Check: {e}")
+            # Bei Fehler: konservativ - erlaube nur bekannte Tools
+            return tool_name in ["read_file", "write_file", "list_directory", "delete_file", "file_exists"]
+        
+        # Fallback: keine Settings gefunden - konservativ
+        return False
+    
     def _generate_response(self, message: str, from_agent_id: Optional[str] = None) -> str:
         """Generiert eine Antwort, nutzt automatisch Tools wenn nötig"""
         if not self.model_manager:
@@ -184,13 +233,18 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
             tool_name = tool_info["tool_name"]
             tool_params = tool_info["params"]
             
-            try:
-                logger.info(f"ChatAgent nutzt Tool: {tool_name} mit Parametern: {tool_params}")
-                tool_result = self.execute_tool(tool_name, **tool_params)
-                tool_used = tool_name
-            except Exception as e:
-                logger.error(f"Fehler bei Tool-Ausführung {tool_name}: {e}")
-                tool_result = f"Fehler bei Tool-Ausführung: {str(e)}"
+            # WICHTIG: Prüfe ob Tool durch UI-Toggle aktiviert ist
+            if not self._is_tool_enabled(tool_name):
+                logger.debug(f"Tool '{tool_name}' ist durch UI-Toggle deaktiviert - überspringe Tool-Nutzung")
+                tool_info = None  # Überspringe Tool-Nutzung
+            else:
+                try:
+                    logger.info(f"ChatAgent nutzt Tool: {tool_name} mit Parametern: {tool_params}")
+                    tool_result = self.execute_tool(tool_name, **tool_params)
+                    tool_used = tool_name
+                except Exception as e:
+                    logger.error(f"Fehler bei Tool-Ausführung {tool_name}: {e}")
+                    tool_result = f"Fehler bei Tool-Ausführung: {str(e)}"
         
         # Erstelle Messages für Modell
         messages = []
@@ -261,22 +315,24 @@ Antworte auf Deutsch:"""
         
         # Generiere Antwort
         try:# 🔥 MODEL SERVICE SUPPORT - Verwende Model Service Client wenn verfügbar
+            effective_max_length = self.config.get("max_length", 1024)
+            effective_temperature = self.config.get("temperature", 0.7)
             if self.model_service_client and self.model_service_client.is_available():
                 # Verwende Model Service
                 result = self.model_service_client.chat(
                     message=message,
                     messages=messages,
                     conversation_id=self.conversation_id,
-                    max_length=1024,
-                    temperature=0.7
+                    max_length=effective_max_length,
+                    temperature=effective_temperature
                 )
                 response = result.get("response", "") if result else ""
             else:
                 # Fallback auf lokalen model_manager
                 response = self.model_manager.generate(
                     messages,
-                    max_length=1024,  # Längere Antworten für Tool-Ergebnisse
-                    temperature=0.7
+                    max_length=effective_max_length,  # Längere Antworten für Tool-Ergebnisse
+                    temperature=effective_temperature
                 )# Bereinige Response (entferne System-Prompt-Phrasen)
             cleaned_response = response.strip()
             
@@ -303,9 +359,17 @@ Antworte auf Deutsch:"""
             
             # POST-PROCESSING: Korrigiere URLs aus Tool-Ergebnissen
             # Verhindert Tippfehler beim Abschreiben von URLs durch das Modell
-            if tool_used == "web_search" and tool_result and isinstance(tool_result, dict):cleaned_response = self._fix_urls_in_response(cleaned_response, tool_result)# POST-PROCESSING: Entferne nicht-deutsche Sprachen (z.B. Chinesisch)
+            if tool_used == "web_search" and tool_result and isinstance(tool_result, dict):
+                cleaned_response = self._fix_urls_in_response(cleaned_response, tool_result)
+            
+            # POST-PROCESSING: Entferne nicht-deutsche Sprachen (z.B. Chinesisch)
             # 🔧 DEAKTIVIERT: Diese Funktion ist zu aggressiv und entfernt wichtige Zeichen aus URLs
             # cleaned_response = self._remove_non_german_text(cleaned_response)
+            
+            # Entferne ggf. versehentlich fortgesetzte Chat-Marker
+            marker_match = re.search(r'\b(?:User|Assistant):', cleaned_response, flags=re.IGNORECASE)
+            if marker_match:
+                cleaned_response = cleaned_response[:marker_match.start()].strip()
             
             logger.info(f"ChatAgent Antwort generiert: {len(cleaned_response)} Zeichen, Tool verwendet: {tool_used}")
             return cleaned_response

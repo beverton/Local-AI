@@ -30,13 +30,14 @@ class QualityManager:
     
     def _load_settings(self) -> Dict[str, Any]:
         """Lädt Quality Settings"""
+        # WICHTIG: Alle Defaults auf False, damit Features nur aktiviert werden wenn explizit gewünscht
         default_settings = {
-            "web_validation": True,  # Web-Search Validierung
-            "contradiction_check": True,  # Widerspruchsprüfung
-            "hallucination_check": True,  # Halluzinations-Erkennung
-            "actuality_check": True,  # Aktualitätsprüfung
-            "source_quality_check": True,  # Quellen-Qualitätsbewertung
-            "completeness_check": True,  # Vollständigkeitsprüfung
+            "web_validation": False,  # Web-Search Validierung
+            "contradiction_check": False,  # Widerspruchsprüfung
+            "hallucination_check": False,  # Halluzinations-Erkennung
+            "actuality_check": False,  # Aktualitätsprüfung
+            "source_quality_check": False,  # Quellen-Qualitätsbewertung
+            "completeness_check": False,  # Vollständigkeitsprüfung
             "auto_web_search": False  # Automatischer Web-Search (Default: False um Blockierung zu vermeiden)
         }
         
@@ -127,7 +128,7 @@ class QualityManager:
         # AUTOMATISCHER WEB-SEARCH (smart + quality_only) - nur wenn aktiviert
         # 1. Smart: Nur bei Fragen die Web-Search benötigen (z.B. aktuelle Infos, Fakten)
         # 2. Quality-only: Für Quality Management Validierung nach Antwort-Generierung
-        if auto_search and self.settings.get("auto_web_search", True):
+        if auto_search and self.settings.get("auto_web_search", False):
             # Prüfe ob Frage Web-Search benötigt (aktuelle Infos, Fakten, etc.)
             needs_search = self._needs_web_search(question)
             
@@ -152,9 +153,9 @@ class QualityManager:
             "suggestions": []
         }
         
-        # Quality Checks - nur wenn in Settings aktiviert
+        # Quality Checks - nur wenn in Settings aktiviert (Default: False)
         # 1. Prüfe auf Widersprüche (wenn mehrere Quellen vorhanden)
-        if self.settings.get("contradiction_check", True) and sources and len(sources) > 1:
+        if self.settings.get("contradiction_check", False) and sources and len(sources) > 1:
             contradictions = self._check_contradictions(response, sources)
             if contradictions:
                 validation["issues"].extend(contradictions)
@@ -163,34 +164,34 @@ class QualityManager:
         
         # 2. Prüfe auf Halluzinationen (Fakten die nicht in Quellen stehen)
         # Hinweis: _check_hallucinations() prüft selbst den Toggle und kann auch ohne sources laufen
-        if self.settings.get("hallucination_check", True):
+        if self.settings.get("hallucination_check", False):
             hallucinations = self._check_hallucinations(response, sources)
             if hallucinations:
                 validation["issues"].extend(hallucinations)
                 validation["confidence"] *= 0.8
         
         # 3. Prüfe Aktualität (wenn Quellen vorhanden)
-        if self.settings.get("actuality_check", True) and sources:
+        if self.settings.get("actuality_check", False) and sources:
             outdated = self._check_actuality(sources)
             if outdated:
                 validation["issues"].append("Einige Quellen könnten veraltet sein")
                 validation["suggestions"].append("Bitte prüfen Sie die Aktualität der Quellen")
         
         # 4. Prüfe Quellen-Qualität
-        if self.settings.get("source_quality_check", True) and sources:
+        if self.settings.get("source_quality_check", False) and sources:
             quality_score = self._rate_source_quality(sources)
             if quality_score < 0.6:
                 validation["issues"].append("Quellen haben niedrige Qualität")
                 validation["confidence"] *= quality_score
         
         # 5. Prüfe auf vollständige Antwort
-        if self.settings.get("completeness_check", True):
+        if self.settings.get("completeness_check", False):
             if not self._check_completeness(response, question):
                 validation["issues"].append("Antwort könnte unvollständig sein")
                 validation["suggestions"].append("Bitte fragen Sie nach, wenn Sie mehr Details benötigen")
         
         # 6. Web-Validation (wenn aktiviert)
-        if self.settings.get("web_validation", True) and sources:
+        if self.settings.get("web_validation", False) and sources:
             # Zusätzliche Validierung gegen Web-Quellen
             web_validation_issues = self._validate_against_web_sources(response, sources)
             if web_validation_issues:

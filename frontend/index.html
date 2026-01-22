@@ -54,6 +54,13 @@
                     </div>
                 </div>
                 
+                <div class="gpu-allocation-status" id="gpuAllocationStatus" style="padding: 10px; background: var(--bg-tertiary); border-radius: 8px; margin-top: 10px; font-size: 0.85em; display: none;">
+                    <div style="font-size: 0.85em; color: var(--text-secondary); margin-bottom: 8px; font-weight: 500;">GPU-Allokation</div>
+                    <div style="margin-bottom: 5px;"><span style="color: var(--text-secondary);">Primary:</span> <span id="sidebarPrimaryBudget">-</span>%</div>
+                    <div style="margin-bottom: 5px;"><span style="color: var(--text-secondary);">Secondary:</span> <span id="sidebarSecondaryBudget">-</span>%</div>
+                    <div style="font-size: 0.8em; color: var(--text-secondary); margin-top: 5px;" id="sidebarLoadedModels">-</div>
+                </div>
+                
                 <div class="settings-toggle">
                     <button class="btn-settings" id="btnSettings">⚙️ Einstellungen</button>
                     <button class="btn-restart" id="btnRestart" style="width: 100%; margin-top: 10px; padding: 10px; background: var(--warning, #e67e22); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;">🔄 Server neu starten</button>
@@ -65,7 +72,8 @@
         <main class="chat-container">
             <div class="chat-header">
                 <div class="header-left">
-                    <h2 id="chatTitle">Neues Gespräch</h2>
+                    <input type="text" id="chatTitleInput" class="chat-title-input" value="Neues Gespräch" style="display: none;">
+                    <h2 id="chatTitle" class="chat-title-display">Neues Gespräch</h2>
                 </div>
                 <div class="header-right">
                     <div class="status-indicators" id="statusIndicators" style="display: flex; flex-direction: column; gap: 5px; align-items: flex-end;">
@@ -365,6 +373,23 @@
                         </label>
                         <p class="setting-description">Deaktiviert automatisches CPU-Offloading für maximale GPU-Auslastung</p>
                     </div>
+                    
+                    <div class="setting-item" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-color);">
+                        <h4 style="margin-bottom: 10px; color: var(--text-primary);">GPU-Allokation</h4>
+                        <div id="gpuAllocationDisplay" style="padding: 10px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 10px; font-size: 0.9em;">
+                            <div style="margin-bottom: 5px;"><strong>Max GPU:</strong> <span id="gpuMaxPercent">90</span>%</div>
+                            <div style="margin-bottom: 5px;"><strong>Primary Budget:</strong> <span id="gpuPrimaryBudget">-</span>%</div>
+                            <div style="margin-bottom: 5px;"><strong>Secondary Budget:</strong> <span id="gpuSecondaryBudget">-</span>%</div>
+                            <div style="margin-top: 10px; font-size: 0.85em; color: var(--text-secondary);">
+                                <div><strong>Geladene Modelle:</strong></div>
+                                <div id="gpuLoadedModels" style="margin-top: 5px;">-</div>
+                            </div>
+                        </div>
+                        <label for="primaryBudgetSlider">Primary Model Budget: <span id="primaryBudgetValue">Auto</span>%</label>
+                        <input type="range" id="primaryBudgetSlider" min="0" max="90" step="1" value="70">
+                        <p class="setting-description">GPU-Budget für Primary-Modelle (Text/Image). Auto = automatische Berechnung basierend auf geladenen Modellen. Max: 90%</p>
+                    </div>
+                    
                     <button class="btn-reset" id="btnApplyPerformance" style="margin-top: 10px;">Performance-Einstellungen anwenden</button>
                     <p class="setting-description" style="font-size: 0.85em; color: var(--text-secondary); margin-top: 5px;">
                         Hinweis: Änderungen werden beim nächsten Modell-Laden wirksam

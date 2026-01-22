@@ -1,6 +1,6 @@
 {
   "web_validation": false,
-  "contradiction_check": false,
+  "contradiction_check": true,
   "hallucination_check": true,
   "actuality_check": false,
   "source_quality_check": false,

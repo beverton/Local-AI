@@ -30,6 +30,7 @@ class ModelManager:
         self.model = None
         self.tokenizer = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.gpu_allocation_budget_gb: Optional[float] = None  # GPU budget in GB for this model
         logger.info(f"Verwende Device: {self.device}")
         
         # Lade Performance-Einstellungen
@@ -37,6 +38,12 @@ class ModelManager:
         
         # Wende GPU-Optimierungen an
         self._apply_gpu_optimizations()
+    
+    def set_gpu_allocation_budget(self, budget_gb: Optional[float]):
+        """Setzt das GPU-Allokations-Budget für dieses Modell (in GB)"""
+        self.gpu_allocation_budget_gb = budget_gb
+        if budget_gb is not None:
+            logger.info(f"GPU-Allokations-Budget für Text-Modell gesetzt: {budget_gb:.2f}GB")
     
     def _load_config(self) -> Dict[str, Any]:
         """Lädt die Konfiguration aus config.json"""
@@ -99,6 +106,22 @@ class ModelManager:
     def is_model_loaded(self) -> bool:
         """Prüft ob ein Modell geladen ist"""
         return self.model is not None and self.tokenizer is not None
+
+    def unload_model(self) -> bool:
+        """Entlädt das aktuelle Modell und gibt GPU-Speicher frei"""
+        try:
+            if self.model is not None:
+                logger.info("Entlade aktuelles Modell...")
+                del self.model
+                del self.tokenizer
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                self.model = None
+                self.tokenizer = None
+                self.current_model_id = None
+            return True
+        except Exception as e:
+            logger.warning(f"Fehler beim Entladen des Modells: {e}")
+            return False
     
     def health_check(self, timeout: float = 5.0) -> Dict[str, Any]:
         """
@@ -189,15 +212,14 @@ class ModelManager:
             
             logger.info(f"Lade Modell: {model_id} von {model_path}")
             
-            # Performance-Settings nur einmal laden
-            perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
-            perf_settings: Dict[str, Any] = {}
-            if os.path.exists(perf_settings_path):
-                try:
-                    with open(perf_settings_path, 'r', encoding='utf-8') as f:
-                        perf_settings = json.load(f)
-                except Exception as e:
-                    logger.warning(f"Fehler beim Laden der Performance-Settings: {e}")
+            # Performance-Settings nur einmal laden (nutze zentrales Modul mit Caching)
+            try:
+                from settings_loader import load_performance_settings
+                perf_settings = load_performance_settings()
+                logger.debug(f"[SETTINGS] Performance-Settings geladen: use_quantization={perf_settings.get('use_quantization')}")
+            except Exception as e:
+                logger.warning(f"Fehler beim Laden der Performance-Settings: {e}, verwende leeres Dict")
+                perf_settings = {}
             
             # Modell-spezifische Lade-Overrides (optional)
             model_loading_cfg = model_info.get("loading", {}) if isinstance(model_info, dict) else {}
@@ -225,11 +247,18 @@ class ModelManager:
                 trust_remote_code=True
             )
             
+            # Qwen: EOS-Token an <|im_end|> ausrichten (verhindert Chat-Marker-Leakage)
+            if "qwen" in model_id.lower():
+                try:
+                    im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+                    if im_end_id is not None and im_end_id != self.tokenizer.unk_token_id:
+                        self.tokenizer.eos_token = "<|im_end|>"
+                except Exception:
+                    pass
+            
             # Performance-Settings für Quantisierung (global → modell-spezifisch)
-            use_quantization = model_loading_cfg.get(
-                "use_quantization",
-                perf_settings.get("use_quantization", False)
-            )
+            # WICHTIG: Wenn nicht in model_loading_cfg, verwende perf_settings
+            use_quantization = model_loading_cfg.get("use_quantization") if "use_quantization" in model_loading_cfg else perf_settings.get("use_quantization", False)
             quantization_bits = model_loading_cfg.get(
                 "quantization_bits",
                 perf_settings.get("quantization_bits", 8)
@@ -284,12 +313,16 @@ class ModelManager:
             
             if custom_device_map is not None:
                 device_map = custom_device_map
-                # FIX: Verwende device_map="cuda" wenn genug GPU-Speicher verfügbar ist
-                # max_memory wird jetzt über UI/API konfigurierbar sein
-                # Wenn device_map="cuda" und max_memory gesetzt: Verwende max_memory als Limit
-                # Wenn device_map="cuda" und kein max_memory: Nutze ganze GPU
-                if device_map == "cuda":
-                    # Prüfe ob max_memory in Performance-Settings gesetzt ist
+                # WICHTIG: GPU-Allokations-Budget hat Priorität über custom_device_map
+                # Prüfe GPU-Budget IMMER zuerst, unabhängig von custom_device_map
+                if self.gpu_allocation_budget_gb is not None and self.gpu_allocation_budget_gb > 0:
+                    # GPU-Allokations-Budget ist gesetzt - verwende es
+                    max_memory = {0: f"{self.gpu_allocation_budget_gb:.2f}GB"}
+                    logger.model_load(f"max_memory aus GPU-Allokation: {self.gpu_allocation_budget_gb:.2f}GB (überschreibt custom_device_map={custom_device_map})")
+                    # Bei Budget-Limit sollte device_map="auto" verwendet werden (auch wenn Config "cuda" sagt)
+                    device_map = "auto"
+                elif device_map == "cuda":
+                    # Kein Budget gesetzt, aber device_map="cuda" - prüfe ob max_memory in Performance-Settings gesetzt ist
                     # Lade Performance-Settings (wird bereits oben geladen, aber hier nochmal für max_memory)
                     perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
                     performance_settings = {}
@@ -305,16 +338,27 @@ class ModelManager:
                         # max_memory wurde im UI gesetzt - verwende es
                         max_memory = {0: f"{ui_max_memory_gb}GB"}
                         logger.model_load(f"max_memory aus UI/Performance-Settings: {ui_max_memory_gb}GB")
+                        device_map = "auto"  # Bei max_memory sollte device_map="auto" sein
                     else:
                         # Kein max_memory gesetzt - nutze ganze GPU (kein max_memory Parameter)
                         max_memory = None
                         logger.model_load("device_map='cuda' - nutze ganze GPU (kein max_memory Limit)")
                     
                     # device_map="cuda" bedeutet: Modell komplett auf GPU, kein CPU-Offloading
-                    disable_cpu_offload = True
+                    # Aber wenn max_memory gesetzt ist, verwenden wir "auto"
+                    if max_memory is None:
+                        disable_cpu_offload = True
             else:
                 if self.device == "cuda":
-                    if use_quantization:
+                    # Prüfe GPU-Allokations-Budget zuerst (hat Priorität)
+                    if self.gpu_allocation_budget_gb is not None and self.gpu_allocation_budget_gb > 0:
+                        # GPU-Allokations-Budget ist gesetzt - verwende es
+                        device_map = "auto"
+                        max_memory = {0: f"{self.gpu_allocation_budget_gb:.2f}GB"}
+                        logger.info(f"GPU-Allokations-Budget aktiv: max_memory={self.gpu_allocation_budget_gb:.2f}GB")
+                        # WICHTIG: Quantisierung sollte trotzdem angewendet werden, wenn aktiviert
+                        # (wird später in model_kwargs hinzugefügt)
+                    elif use_quantization:
                         # Bei Quantisierung muss device_map="auto" sein, aber wir können max_memory setzen
                         device_map = "auto"
                         if disable_cpu_offload:
@@ -351,6 +395,8 @@ class ModelManager:
                 f"disable_cpu_offload={disable_cpu_offload}, use_quantization={use_quantization}, "
                 f"quantization_bits={quantization_bits}, model_specific={has_model_specific}"
             )
+            # DEBUG: Logge auch perf_settings für Debugging
+            logger.debug(f"DEBUG: perf_settings keys={list(perf_settings.keys())}, perf_settings['use_quantization']={perf_settings.get('use_quantization')}, model_loading_cfg.get('use_quantization')={model_loading_cfg.get('use_quantization')}, final use_quantization={use_quantization}")
             
             # OPTIMIERUNG: Bei device_map="cuda" sollte max_memory NICHT gesetzt werden (nutzt ganze GPU)
             # max_memory wird nur bei device_map="auto" benötigt
@@ -377,7 +423,7 @@ class ModelManager:
                             load_in_8bit=True,
                             bnb_8bit_compute_dtype=torch.float16  # FIX: float16 statt bfloat16
                         )
-                        logger.info("8-bit Quantisierung wird verwendet")
+                        logger.info(f"8-bit Quantisierung wird verwendet (GPU-Budget: {self.gpu_allocation_budget_gb}GB, max_memory: {max_memory})")
                     elif quantization_bits == 4:
                         quantization_config = BitsAndBytesConfig(
                             load_in_4bit=True,
@@ -449,6 +495,51 @@ class ModelManager:
                     # Bei device_map="cuda" ist Validierung nicht nötig - Modell ist direkt auf GPU
                     logger.model_load("✓ Modell direkt auf GPU geladen (device_map='cuda', keine Validierung nötig)")
             
+            # OPTIMIERUNG: Wenn Modell mit device_map="auto" geladen wurde, prüfe ob wir es vollständig auf GPU verschieben können
+            # WICHTIG: Nur wenn KEINE Quantisierung aktiv ist (Quantisierung funktioniert nur mit device_map="auto")
+            # Dies verbessert die Generierungsgeschwindigkeit erheblich
+            if device_map == "auto" and self.device == "cuda" and torch.cuda.is_available() and not use_quantization:
+                try:
+                    # Prüfe ob Modell auf mehrere Devices verteilt ist
+                    if hasattr(self.model, 'hf_device_map') and self.model.hf_device_map:
+                        devices_used = set(self.model.hf_device_map.values())
+                        if len(devices_used) > 1 or 'cpu' in str(devices_used).lower():
+                            # Modell ist auf mehrere Devices verteilt - versuche es auf GPU zu konsolidieren
+                            logger.info("Modell wurde mit device_map='auto' geladen und ist auf mehrere Devices verteilt")
+                            
+                            # Prüfe verfügbaren GPU-Speicher
+                            gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+                            gpu_memory_reserved = torch.cuda.memory_reserved(0) / (1024**3)  # GB
+                            gpu_memory_available = gpu_memory_total - gpu_memory_reserved
+                            
+                            # Grobe Schätzung: 7B Modell braucht ~14GB (FP16), 3B Modell braucht ~6GB
+                            # Bei Quantisierung: 7B braucht ~7.5GB (8-bit), 3B braucht ~3.5GB
+                            model_size_estimate = 14.0 if "7b" in model_id.lower() else 6.0
+                            
+                            # Prüfe ob Budget es erlaubt (wenn Budget gesetzt)
+                            budget_allows = True
+                            if self.gpu_allocation_budget_gb is not None and self.gpu_allocation_budget_gb > 0:
+                                # Budget ist gesetzt - prüfe ob genug Budget für vollständiges GPU-Laden
+                                if gpu_memory_available < self.gpu_allocation_budget_gb * 0.9:
+                                    budget_allows = False
+                                    logger.info(f"GPU-Budget ({self.gpu_allocation_budget_gb}GB) erlaubt kein vollständiges GPU-Laden")
+                            
+                            # Wenn genug GPU-Speicher verfügbar ist UND Budget es erlaubt, verschiebe Modell auf GPU
+                            if budget_allows and gpu_memory_available >= model_size_estimate * 0.8:  # 80% des geschätzten Modell-Speichers
+                                logger.info(f"Genug GPU-Speicher verfügbar ({gpu_memory_available:.2f}GB) - verschiebe Modell vollständig auf GPU für bessere Performance")
+                                try:
+                                    # Verschiebe Modell auf GPU (device_map entfernen)
+                                    self.model = self.model.to("cuda")
+                                    logger.info("Modell erfolgreich auf GPU verschoben - Generierung wird schneller sein")
+                                except Exception as move_error:
+                                    logger.warning(f"Konnte Modell nicht auf GPU verschieben: {move_error} - verwende device_map='auto'")
+                            else:
+                                logger.info(f"Nicht genug GPU-Speicher verfügbar ({gpu_memory_available:.2f}GB) oder Budget-Limit - behalte device_map='auto'")
+                except Exception as e:
+                    logger.debug(f"Fehler beim Prüfen der Device-Verteilung: {e}")
+            elif use_quantization:
+                logger.debug("Quantisierung aktiv - behalte device_map='auto' (Quantisierung erfordert device_map='auto')")
+            
             # Prüfe Performance-Settings für torch.compile() (wiederverwende bereits geladene perf_settings)
             use_torch_compile = perf_settings.get("use_torch_compile", False)
             
@@ -513,22 +604,36 @@ class ModelManager:
                     if completeness["complete"]:
                         return response
                     else:
-                        # Response ist unvollständig
-                        if attempt < max_retries and completeness.get("suggested_max_length"):
-                            logger.warning(f"Response unvollständig: {completeness['reason']}, retry mit max_length={completeness['suggested_max_length']}")
+                        # Response ist unvollständig - OPTIMIERT: Nur retry wenn wirklich kritisch
+                        # Unvollständige Sätze sind OK wenn Response lang genug ist (>100 Zeichen)
+                        is_critical_incomplete = len(response.strip()) < 100 or completeness.get("reason", "").startswith("Response zu kurz")
+                        
+                        if is_critical_incomplete and attempt < max_retries and completeness.get("suggested_max_length"):
+                            logger.warning(f"Response kritisch unvollständig: {completeness['reason']}, retry mit max_length={completeness['suggested_max_length']}")
                             current_max_length = completeness["suggested_max_length"]
                             continue
                         else:
-                            # Response ist unvollständig, aber keine Retries mehr
-                            logger.warning(f"Response unvollständig, aber keine Retries mehr: {completeness['reason']}")
+                            # Response ist unvollständig, aber nicht kritisch - gebe zurück
+                            if not is_critical_incomplete:
+                                logger.debug(f"Response unvollständig aber akzeptabel ({len(response)} Zeichen): {completeness['reason']}")
+                            else:
+                                logger.warning(f"Response unvollständig, aber keine Retries mehr: {completeness['reason']}")
                             return response  # Gebe trotzdem zurück, da teilweise gültig
                 else:
-                    logger.warning(f"Ungültige Response bei Versuch {attempt + 1}/{max_retries + 1}, retry...")
-                    if attempt < max_retries:
+                    # Response ist ungültig - OPTIMIERT: Prüfe ob wirklich kritisch
+                    # Wenn Response hauptsächlich Sonderzeichen ist, ist es kritisch
+                    # Wenn Response nur zu kurz ist, ist es weniger kritisch
+                    is_critical_invalid = len(response.strip()) < 20 or not any(c.isalnum() for c in response)
+                    
+                    if is_critical_invalid and attempt < max_retries:
+                        logger.warning(f"Kritisch ungültige Response bei Versuch {attempt + 1}/{max_retries + 1}, retry...")
                         # Erhöhe max_length für Retry
                         current_max_length = int(current_max_length * 1.5)
                         continue
                     else:
+                        if not is_critical_invalid:
+                            logger.debug(f"Response ungültig aber akzeptabel ({len(response)} Zeichen), gebe zurück")
+                            return response  # Gebe zurück auch wenn ungültig
                         # Letzter Versuch fehlgeschlagen - Exception werfen statt Fallback
                         raise RuntimeError("Konnte nach mehreren Versuchen keine gültige Antwort generieren")
             except Exception as e:
@@ -563,6 +668,9 @@ class ModelManager:
         # Reduziert von 10 auf 5 Zeichen - Mistral kann sehr kurze, gültige Antworten geben
         response_stripped = response.strip()
         if len(response_stripped) < 5:
+            if self._is_short_response_allowed(messages, response_stripped):
+                logger.debug("[Validation] Kurze Antwort ist erlaubt")
+                return True
             logger.debug(f"[Validation] Response zu kurz: {len(response_stripped)} Zeichen")
             return False
         
@@ -595,15 +703,41 @@ class ModelManager:
                 logger.debug("[Validation] Response wiederholt nur User-Nachricht")
                 return False
         
-        # NEUE PRÜFUNG: Response sollte mindestens ein Wort enthalten (nicht nur Sonderzeichen)
-        import re
-        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]+\b', response_stripped)
-        if len(words) == 0 and len(response_stripped) < 10:
-            logger.debug(f"[Validation] Response enthält keine Wörter (nur Sonderzeichen): {repr(response_stripped)}")
+        # NEUE ROBUSTE PRÜFUNG: Verwende _validate_response_quality für Sonderzeichen-Erkennung
+        if not self._validate_response_quality(response):
+            logger.debug(f"[Validation] Response-Qualität ungültig (hauptsächlich Sonderzeichen)")
             return False
         
+        import re
+        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]+\b', response_stripped)
         logger.debug(f"[Validation] Response ist gültig: {len(response_stripped)} Zeichen, {len(words)} Wörter")
         return True
+
+    def _is_short_response_allowed(self, messages: List[Dict[str, str]], response: str) -> bool:
+        """
+        Erlaubt sehr kurze Antworten, wenn die User-Nachricht explizit danach fragt.
+        """
+        if not response:
+            return False
+        response_lower = response.strip().lower()
+        if not messages:
+            return False
+        last_user = next((msg for msg in reversed(messages) if msg.get("role") == "user"), None)
+        if not last_user:
+            return False
+        prompt = last_user.get("content", "").lower()
+        short_intents = [
+            "nur mit dem wort", "nur das wort", "nur das", "antworte kurz",
+            "kurz", "ja oder nein", "yes or no", "true or false", "ok"
+        ]
+        if any(k in prompt for k in short_intents):
+            allowed = {"ok", "ja", "nein", "yes", "no", "true", "false", "1", "0"}
+            return response_lower in allowed or len(response_lower) <= 4
+        # Datei-Operationen: kurze Bestätigung akzeptieren
+        if ("datei" in prompt and ("schreibe" in prompt or "speichere" in prompt)) or "write_file" in prompt:
+            allowed = {"ok", "ja", "nein", "yes", "no", "true", "false", "1", "0"}
+            return response_lower in allowed or len(response_lower) <= 4
+        return False
     
     def _check_completeness(self, response: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -654,6 +788,12 @@ class ModelManager:
         if messages:
             last_user = next((msg for msg in reversed(messages) if msg["role"] == "user"), None)
             if last_user:
+                if self._is_short_response_allowed(messages, response_stripped):
+                    return {
+                        "complete": True,
+                        "reason": "Kurzantwort explizit erlaubt",
+                        "suggested_max_length": None
+                    }
                 question_length = len(last_user["content"])
                 if len(response_stripped) < 50 and len(response_stripped.split()) < 10 and question_length > 50:
                     return {
@@ -667,6 +807,47 @@ class ModelManager:
             "reason": "Response erscheint vollständig",
             "suggested_max_length": None
         }
+    
+    def _validate_response_quality(self, response: str) -> bool:
+        """
+        Prüft ob Response gültige Text-Inhalte enthält (nicht nur Sonderzeichen)
+        
+        Args:
+            response: Die zu prüfende Response
+            
+        Returns:
+            True wenn Response gültig ist, False wenn hauptsächlich Sonderzeichen
+        """
+        import re
+        
+        if not response or len(response.strip()) < 5:
+            return False
+        
+        # Entferne Whitespace für Berechnung
+        text_without_whitespace = response.replace(' ', '').replace('\n', '').replace('\t', '')
+        
+        if len(text_without_whitespace) == 0:
+            return False
+        
+        # Zähle alphanumerische Zeichen (Buchstaben und Ziffern)
+        alphanumeric_chars = len(re.findall(r'[a-zA-ZäöüßÄÖÜ0-9]', response))
+        total_chars = len(text_without_whitespace)
+        
+        # Berechne Anteil alphanumerischer Zeichen
+        alphanumeric_ratio = alphanumeric_chars / total_chars if total_chars > 0 else 0
+        
+        # Wenn weniger als 30% alphanumerische Zeichen: wahrscheinlich nur Sonderzeichen
+        if alphanumeric_ratio < 0.3:
+            logger.warning(f"[VALIDATION] Response enthält hauptsächlich Sonderzeichen: {alphanumeric_ratio:.2%} alphanumerisch, Response: {repr(response[:100])}")
+            return False
+        
+        # Prüfe ob mindestens ein Wort vorhanden ist (mindestens 2 Buchstaben)
+        words = re.findall(r'\b[a-zA-ZäöüßÄÖÜ]{2,}\b', response)
+        if len(words) == 0:
+            logger.warning(f"[VALIDATION] Response enthält keine Wörter (mind. 2 Buchstaben), Response: {repr(response[:100])}")
+            return False
+        
+        return True
     
     def _clean_response_minimal(self, response: str, messages: List[Dict[str, str]], original_prompt: str = "") -> str:
         """
@@ -755,7 +936,8 @@ class ModelManager:
         fullwidth_to_ascii = {
             '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
             '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
-            '＋': '+', '－': '-', '×': '*', '÷': '/', '＝': '='
+            '＋': '+', '－': '-', '×': '*', '÷': '/', '＝': '=',
+            '。': '.', '，': ',', '：': ':', '；': ';', '？': '?', '！': '!'
         }
         for fullwidth, ascii_char in fullwidth_to_ascii.items():
             response = response.replace(fullwidth, ascii_char)
@@ -799,16 +981,41 @@ class ModelManager:
             user_markers = ['Human:', 'User:']  # Immer trimmen
             assistant_markers = ['Assistant:', 'System:']  # Nur trimmen wenn wenig Content
             
-            # Zuerst: User-Marker (immer trimmen, aber nur wenn genug Content vorher)
+            # Zuerst: User-Marker (intelligente Behandlung)
             for marker in user_markers:
                 positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
                 for pos in positions:
-                    if pos > 100:  # Mindestens 100 Zeichen vom Anfang (erhöht für Code)
-                        # Prüfe ob vor dem Marker genug Content ist
+                    if pos > 50:  # Marker ist nicht am Anfang
+                        # Prüfe Content VOR und NACH dem Marker
                         before_marker = response[:pos].strip()
-                        if len(before_marker) > 50:  # Mindestens 50 Zeichen vor Marker
-                            response = response[:pos].strip()
-                            logger.debug(f"[Clean] Trimmed at user marker '{marker}' at position {pos}")
+                        after_marker_start = pos + len(marker)
+                        after_marker = response[after_marker_start:].strip()
+                        
+                        # Wenn nach Marker viel Content kommt (>100 Zeichen), behalte den Text NACH dem Marker
+                        # (Modell hat User-Nachricht wiederholt, aber Antwort kommt danach)
+                        if len(after_marker) > 100:
+                            # Extrahiere nur den Text nach "User:" (die eigentliche Antwort)
+                            # Entferne auch die User-Nachricht selbst wenn sie wiederholt wird
+                            # Suche nach dem nächsten Zeilenumbruch oder Fragezeichen als Trennzeichen
+                            lines_after = after_marker.split('\n')
+                            if len(lines_after) > 1:
+                                # Nimm alles nach der ersten Zeile (User-Nachricht)
+                                response = '\n'.join(lines_after[1:]).strip()
+                            else:
+                                # Kein Zeilenumbruch - prüfe ob Fragezeichen vorhanden
+                                qmark_pos = after_marker.find('?')
+                                if qmark_pos > 0 and qmark_pos < 200:
+                                    # Fragezeichen gefunden - Text danach ist die Antwort
+                                    response = after_marker[qmark_pos + 1:].strip()
+                                else:
+                                    # Kein klares Trennzeichen - behalte alles nach Marker
+                                    response = after_marker
+                            logger.debug(f"[Clean] User-Marker gefunden, behalte Text NACH Marker ({len(response)} Zeichen)")
+                            break
+                        # Wenn nach Marker wenig Content, entferne Marker und alles danach
+                        elif len(before_marker) > 50:  # Mindestens 50 Zeichen vor Marker
+                            response = before_marker
+                            logger.debug(f"[Clean] Trimmed at user marker '{marker}' at position {pos} (wenig Content danach)")
                             break
                 if len(response) < len(response_before) * 0.7:  # Nur wenn weniger als 70% übrig
                     break
@@ -891,6 +1098,24 @@ class ModelManager:
         for placeholder, code_block in code_block_map.items():
             response = response.replace(placeholder, code_block)
         
+        # Entferne verwaiste Code-Fences wenn kein Code-Block erkannt wurde
+        if "```" in response and not code_blocks:
+            response = response.replace("```", "")
+        
+        # 6. Letzte Sicherheits-Trim bei Chat-Markern (weniger aggressiv)
+        marker_matches = []
+        for marker in ['User:', 'Assistant:']:
+            positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
+            marker_matches.extend(positions)
+        if marker_matches:
+            first_marker = min(marker_matches)
+            # Nur abschneiden wenn Marker weit genug hinten ist (mindestens 20 Zeichen Response davor)
+            if first_marker >= 20:
+                response = response[:first_marker].strip()
+            else:
+                # Marker ist zu früh - entferne nur den Marker selbst, nicht den Text danach
+                response = re.sub(r'\b(?:User|Assistant)\s*[:：]\s*', '', response, flags=re.IGNORECASE, count=1)
+        
         return response.strip()
     
     def _validate_basic(self, response: str) -> bool:
@@ -903,6 +1128,13 @@ class ModelManager:
         if not response or len(response.strip()) == 0:
             return False
         if len(response.strip()) < 5:
+            short = response.strip().lower()
+            allowed_short = {"ok", "ja", "nein", "yes", "no", "true", "false", "1", "0"}
+            if short in allowed_short:
+                return True
+            # Erlaube sehr kurze alphanumerische Antworten (mind. 2 Zeichen)
+            if len(short) >= 2 and any(c.isalnum() for c in short):
+                return True
             return False
         
         # Prüfe ob Response Code-Blocks enthält
@@ -947,6 +1179,7 @@ class ModelManager:
         """
         Fallback: Minimal Cleaning auf Original
         WICHTIG: Code-Blocks werden geschützt, nur sicherste Schritte
+        Weniger aggressiv als vorher - behält mehr Text
         """
         import re
         
@@ -965,14 +1198,25 @@ class ModelManager:
         total_code_length = sum(len(cb) for cb in code_blocks)
         is_mostly_code = total_code_length > len(original_response) * 0.5
         
-        # 3. HTML entfernen (nur außerhalb Code-Blocks)
-        html_pattern = r'<[^>]+>'
+        # 3. HTML entfernen (nur außerhalb Code-Blocks) - weniger aggressiv
+        # Entferne nur bekannte HTML-Tags, nicht alle <...>
+        html_tags_to_remove = ['<br>', '<br/>', '<p>', '</p>', '<div>', '</div>', '<span>', '</span>']
+        for tag in html_tags_to_remove:
+            response = response.replace(tag, '')
+        # Entferne nur unbekannte Tags wenn sie offensichtlich HTML sind (z.B. <tag>)
+        html_pattern = r'<[a-zA-Z][^>]*>'
         response = re.sub(html_pattern, '', response)
         
-        # 4. CJK entfernen (NUR wenn NICHT hauptsächlich Code)
-        if re.search(r'[a-zA-ZäöüßÄÖÜ]', response) and not is_mostly_code:
-            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f\u2b740-\u2b81f\u2b820-\u2ceaf\uf900-\ufaff\u3300-\u33ff\ufe30-\ufe4f\uf900-\ufaff\u2f800-\u2fa1f]+'
-            response = re.sub(cjk_pattern, '', response)
+        # 4. CJK entfernen NUR wenn Response hauptsächlich lateinische Zeichen hat
+        # UND Response ist lang genug (>50 Zeichen) UND nicht hauptsächlich Code
+        if len(response) > 50 and re.search(r'[a-zA-ZäöüßÄÖÜ]', response) and not is_mostly_code:
+            # Prüfe ob Response hauptsächlich lateinische Zeichen hat
+            latin_chars = len(re.findall(r'[a-zA-ZäöüßÄÖÜ]', response))
+            cjk_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', response))
+            # Nur entfernen wenn CJK weniger als 20% der Zeichen sind
+            if cjk_chars > 0 and latin_chars > cjk_chars * 4:
+                cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf]+'
+                response = re.sub(cjk_pattern, '', response)
         
         # 5. Chat-Marker trimmen (nur wenn NICHT hauptsächlich Code ODER sehr weit hinten)
         if not is_mostly_code:
@@ -1088,9 +1332,20 @@ class ModelManager:
                 model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
                 model_max_context = model_limits.get(model_name, model_limits["default"])
             
+            # Verwende max_length als gewünschte Ausgabelänge (max_new_tokens)
+            desired_new_tokens = max_length
+            if desired_new_tokens >= model_max_context:
+                desired_new_tokens = max(1, model_max_context - 1)
+                logger.warning(f"max_length zu hoch für Modell-Kontext. Setze gewünschte Ausgabelänge auf {desired_new_tokens} Tokens (Modell-Limit: {model_max_context}).")
+            
+            # Maximale Eingabe-Länge basierend auf gewünschter Ausgabelänge
+            max_input_tokens = model_max_context - desired_new_tokens
+            if max_input_tokens < 1:
+                raise ValueError(f"Modell-Kontext zu klein für gewünschte Ausgabelänge: model_max_context={model_max_context}, desired_new_tokens={desired_new_tokens}")
+            
             # FIX: Wenn Input zu lang ist, kürze die Messages automatisch
-            if input_length > max_length:
-                logger.warning(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}. Kürze Messages...")
+            if input_length > max_input_tokens:
+                logger.warning(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubte Eingabe: {max_input_tokens}, Modell-Limit: {model_max_context}. Kürze Messages...")
                 
                 # Versuche, die letzten Messages zu kürzen (behält System-Prompt und erste User-Message)
                 if len(messages) > 2:
@@ -1108,7 +1363,7 @@ class ModelManager:
                             other_messages.append(msg)
                     
                     # Kürze andere Messages (entferne älteste zuerst)
-                    while input_length > max_length and len(other_messages) > 0:
+                    while input_length > max_input_tokens and len(other_messages) > 0:
                         removed = other_messages.pop(0)  # Entferne älteste Message
                         logger.debug(f"Entferne Message aus History: {removed.get('role', 'unknown')}")
                         
@@ -1130,9 +1385,9 @@ class ModelManager:
                         inputs = new_inputs
                     
                     # Wenn immer noch zu lang, kürze die letzte User-Message
-                    if input_length > max_length and first_user_msg:
-                        # Kürze die erste User-Message auf max. 50% der erlaubten Länge
-                        max_user_tokens = max_length // 2
+                    if input_length > max_input_tokens and first_user_msg:
+                        # Kürze die erste User-Message auf max. 50% der erlaubten Eingabelänge
+                        max_user_tokens = max_input_tokens // 2
                         user_content = first_user_msg.get("content", "")
                         user_inputs = self.tokenizer(user_content, return_tensors="pt")
                         user_length = user_inputs['input_ids'].shape[1]
@@ -1159,24 +1414,23 @@ class ModelManager:
                     logger.info(f"Messages gekürzt. Neue Input-Länge: {input_length} Tokens")
                 else:
                     # Nur 1-2 Messages - kann nicht gekürzt werden
-                    raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}. Bitte kürze deine Nachricht.")
+                    raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubte Eingabe: {max_input_tokens}, Modell-Limit: {model_max_context}. Bitte kürze deine Nachricht.")
             
-            # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
-            # WICHTIG: Verwende max_length direkt (ohne hartes Limit), damit User-Einstellungen respektiert werden
+            # Berechne max_new_tokens korrekt (max_length = gewünschte Ausgabelänge)
             max_new_tokens = min(
-                max_length - input_length,  # Verfügbarer Platz basierend auf max_length (User-Einstellung)
-                model_max_context - input_length  # Verfügbarer Platz basierend auf Modell-Limit
+                desired_new_tokens,
+                model_max_context - input_length
             )
             
             # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
             if max_new_tokens <= 0:
-                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}")
+                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubte Eingabe: {max_input_tokens}, Modell-Limit: {model_max_context}")
             
             # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
             max_new_tokens = max(1, max_new_tokens)
             
             # Logging für Debugging
-            logger.info(f"Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
+            logger.info(f"Input-Länge: {input_length}, gewünschte Ausgabelänge: {desired_new_tokens}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
             
             # Generate mit besseren Parametern
             # Leere GPU Cache vor Generation
@@ -1272,7 +1526,8 @@ class ModelManager:
                     # Andere Modelle: Single Integer
                     eos_token_id_for_generate = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
                 
-                logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id={eos_token_id_for_generate}, max_new_tokens={max_new_tokens}, temperature={temperature}")
+                max_time_seconds = max(5.0, min(30.0, max_new_tokens / 4))
+                logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id={eos_token_id_for_generate}, max_new_tokens={max_new_tokens}, temperature={temperature}, max_time={max_time_seconds}s")
                 
                 # DEBUG: GPU-Speicher-Status vor Generierung
                 if torch.cuda.is_available():
@@ -1330,6 +1585,7 @@ class ModelManager:
                     outputs = self.model.generate(
                         **inputs,
                         max_new_tokens=max_new_tokens,
+                        max_time=max_time_seconds,
                         temperature=effective_temperature,
                         do_sample=effective_temperature is not None and effective_temperature > 0,
                         top_p=effective_top_p,
@@ -1397,46 +1653,123 @@ class ModelManager:
                     if len(eos_pos) > 0:
                         eos_positions.append(eos_pos[0].item())
                 
+                # WICHTIG: Prüfe auch auf <|endoftext|> Token (wird oft nicht als EOS erkannt)
+                try:
+                    endoftext_token_id = self.tokenizer.convert_tokens_to_ids("<|endoftext|>")
+                    if endoftext_token_id is not None and endoftext_token_id != self.tokenizer.unk_token_id:
+                        endoftext_pos = (new_tokens == endoftext_token_id).nonzero(as_tuple=True)[0]
+                        if len(endoftext_pos) > 0:
+                            eos_positions.append(endoftext_pos[0].item())
+                            logger.debug(f"[FIX] <|endoftext|> Token gefunden an Position {endoftext_pos[0].item()}")
+                except:
+                    pass
+                
                 # Schneide beim ersten EOS-Token ab
                 if eos_positions:
                     new_tokens = new_tokens[:min(eos_positions)]
                 else:
-                    # WARNUNG: Kein EOS-Token gefunden - schneide nach ersten vollständigen Sätzen ab
-                    logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Schneide nach ersten vollständigen Sätzen ab.")
+                    # WARNUNG: Kein EOS-Token gefunden - intelligente Abschneide-Logik
+                    logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Verwende intelligente Abschneide-Logik.")
                     # Dekodiere temporär, um Satzenden zu finden
                     temp_response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                     import re
                     
-                    # Finde erste vollständige Sätze (endet mit Punkt, Ausrufezeichen oder Fragezeichen)
+                    # Finde alle vollständigen Sätze (endet mit Punkt, Ausrufezeichen oder Fragezeichen)
                     # Suche nach Satzenden gefolgt von Leerzeichen oder Zeilenumbruch
                     sentence_pattern = r'[.!?][\s\n]+'
                     sentence_matches = list(re.finditer(sentence_pattern, temp_response))
                     
-                    if len(sentence_matches) >= 2:
-                        # Verwende ersten 2 vollständigen Sätze
-                        cut_pos = sentence_matches[1].end()
+                    # WICHTIG: Prüfe auch auf "Human:" Marker (zeigt dass Modell weiter generiert)
+                    human_marker = re.search(r'Human:', temp_response, re.IGNORECASE)
+                    
+                    if human_marker and human_marker.start() > 0:
+                        # Schneide vor "Human:" Marker ab
+                        cut_pos = human_marker.start()
                         cut_text = temp_response[:cut_pos].strip()
-                        
                         # Re-encode um exakte Token-Position zu finden
                         cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
                         if len(cut_tokens) < len(new_tokens):
                             new_tokens = new_tokens[:len(cut_tokens)]
-                            logger.info(f"[FIX] Response nach ersten 2 Sätzen abgeschnitten: {len(new_tokens)} Tokens")
-                    elif len(sentence_matches) >= 1:
-                        # Verwende ersten vollständigen Satz
-                        cut_pos = sentence_matches[0].end()
-                        cut_text = temp_response[:cut_pos].strip()
-                        
-                        # Re-encode um exakte Token-Position zu finden
-                        cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
-                        if len(cut_tokens) < len(new_tokens):
-                            new_tokens = new_tokens[:len(cut_tokens)]
-                            logger.info(f"[FIX] Response nach erstem Satz abgeschnitten: {len(new_tokens)} Tokens")
+                            logger.info(f"[FIX] Response vor 'Human:' Marker abgeschnitten: {len(new_tokens)} Tokens")
+                    elif len(sentence_matches) > 0:
+                        # VERBESSERT: Verwende mehrere Sätze statt nur den ersten
+                        # Wenn max_new_tokens erreicht wurde, verwende die vollständige Antwort
+                        # Ansonsten verwende bis zu 10 Sätze oder 80% der Tokens, je nachdem was kleiner ist
+                        if len(new_tokens) >= max_new_tokens * 0.95:
+                            # Antwort ist fast so lang wie max_new_tokens - verwende vollständige Antwort
+                            logger.info(f"[FIX] max_new_tokens erreicht ({len(new_tokens)}/{max_new_tokens}), verwende vollständige Antwort")
+                            # new_tokens bleibt unverändert
+                        else:
+                            # Verwende mehrere Sätze (bis zu 10 oder bis zu 80% der Tokens)
+                            max_sentences = min(10, len(sentence_matches))
+                            max_tokens_80_percent = int(len(new_tokens) * 0.8)
+                            
+                            # Finde die Position nach dem letzten gewünschten Satz
+                            if max_sentences <= len(sentence_matches):
+                                cut_pos = sentence_matches[max_sentences - 1].end()
+                            else:
+                                cut_pos = sentence_matches[-1].end()
+                            
+                            cut_text = temp_response[:cut_pos].strip()
+                            cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
+                            
+                            # Verwende das Minimum von: Satz-basierter Cut oder 80% der Tokens
+                            if len(cut_tokens) < max_tokens_80_percent:
+                                if len(cut_tokens) < len(new_tokens):
+                                    new_tokens = new_tokens[:len(cut_tokens)]
+                                    logger.info(f"[FIX] Response nach {max_sentences} Sätzen abgeschnitten: {len(new_tokens)} Tokens")
+                            else:
+                                # 80% ist kleiner - aber schneide nach vollständigem Wort ab
+                                cut_text_80 = self.tokenizer.decode(new_tokens[:max_tokens_80_percent], skip_special_tokens=True)
+                                # Finde letztes vollständiges Wort (suche rückwärts nach Leerzeichen oder Satzzeichen)
+                                last_space = cut_text_80.rfind(' ')
+                                last_punct = max(cut_text_80.rfind('.'), cut_text_80.rfind('!'), cut_text_80.rfind('?'))
+                                last_word_end = max(last_space, last_punct)
+                                
+                                if last_word_end > len(cut_text_80) * 0.7:  # Mindestens 70% der 80%-Länge
+                                    # Schneide nach vollständigem Wort
+                                    cut_text_final = cut_text_80[:last_word_end + 1].strip()
+                                    cut_tokens_final = self.tokenizer.encode(cut_text_final, add_special_tokens=False)
+                                    if len(cut_tokens_final) < len(new_tokens):
+                                        new_tokens = new_tokens[:len(cut_tokens_final)]
+                                        logger.info(f"[FIX] Response nach 80% der Tokens abgeschnitten (nach vollständigem Wort): {len(new_tokens)} Tokens")
+                                    else:
+                                        # Fallback: verwende 80% direkt
+                                        new_tokens = new_tokens[:max_tokens_80_percent]
+                                        logger.info(f"[FIX] Response nach 80% der Tokens abgeschnitten: {len(new_tokens)} Tokens")
+                                else:
+                                    # Kein gutes Wort-Ende gefunden - verwende 80% direkt
+                                    new_tokens = new_tokens[:max_tokens_80_percent]
+                                    logger.info(f"[FIX] Response nach 80% der Tokens abgeschnitten: {len(new_tokens)} Tokens")
                     else:
-                        # Keine Satzenden gefunden - schneide nach ersten 50 Tokens ab (für sehr kurze Antworten)
-                        if len(new_tokens) > 50:
-                            new_tokens = new_tokens[:50]
-                            logger.warning(f"[FIX] Keine Satzenden gefunden, schneide nach 50 Tokens ab")
+                        # Keine Satzenden gefunden - verwende 80% der Tokens, aber nach vollständigem Wort
+                        min_tokens = min(100, len(new_tokens))
+                        max_tokens_80_percent = int(len(new_tokens) * 0.8)
+                        cut_tokens = max(min_tokens, max_tokens_80_percent)
+                        
+                        if cut_tokens < len(new_tokens):
+                            # Dekodiere bis zum Cut-Punkt und finde letztes vollständiges Wort
+                            cut_text = self.tokenizer.decode(new_tokens[:cut_tokens], skip_special_tokens=True)
+                            # Finde letztes vollständiges Wort (suche rückwärts nach Leerzeichen)
+                            last_space = cut_text.rfind(' ')
+                            last_punct = max(cut_text.rfind('.'), cut_text.rfind('!'), cut_text.rfind('?'))
+                            last_word_end = max(last_space, last_punct)
+                            
+                            if last_word_end > len(cut_text) * 0.7:  # Mindestens 70% der Cut-Länge
+                                # Schneide nach vollständigem Wort
+                                cut_text_final = cut_text[:last_word_end + 1].strip()
+                                cut_tokens_final = self.tokenizer.encode(cut_text_final, add_special_tokens=False)
+                                if len(cut_tokens_final) < len(new_tokens):
+                                    new_tokens = new_tokens[:len(cut_tokens_final)]
+                                    logger.info(f"[FIX] Keine Satzenden gefunden, schneide nach vollständigem Wort ab: {len(new_tokens)} Tokens (ursprünglich {cut_tokens})")
+                                else:
+                                    # Fallback: verwende ursprünglichen Cut
+                                    new_tokens = new_tokens[:cut_tokens]
+                                    logger.warning(f"[FIX] Keine Satzenden gefunden, schneide nach {cut_tokens} Tokens ab (80% von {len(new_tokens)})")
+                            else:
+                                # Kein gutes Wort-Ende gefunden - verwende ursprünglichen Cut
+                                new_tokens = new_tokens[:cut_tokens]
+                                logger.warning(f"[FIX] Keine Satzenden gefunden, schneide nach {cut_tokens} Tokens ab (80% von {len(new_tokens)})")
                 
                 decode_start_time = time.time()
                 # WICHTIG: Verwende skip_special_tokens=True standardmäßig, um korrekte Dekodierung zu gewährleisten
@@ -1445,17 +1778,20 @@ class ModelManager:
                 logger.debug(f"[Generate] Raw decoded response length: {len(response)} chars, first 100 chars: {response[:100]}")
                 logger.warning(f"[DEBUG] RAW RESPONSE (vollständig): {repr(response)}")  # WICHTIG: Vollständige Raw-Response für Debugging
                 
-                # Prüfe ob Response nur Sonderzeichen enthält
+                # Prüfe ob Response nur Sonderzeichen enthält (wird später in _validate_response_quality geprüft)
+                # Versuche alternative Decodierung als Fallback
                 import re
                 has_letters = bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response))
                 if not has_letters or len(response.strip()) < 5:
-                    logger.warning(f"[WARNING] Response enthält keine Buchstaben oder ist zu kurz! Response: {repr(response)}")
+                    logger.warning(f"[WARNING] Response enthält keine Buchstaben oder ist zu kurz! Versuche alternative Decodierung...")
                     # Versuche mit skip_special_tokens=False als Fallback
                     response_alt = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
-                    logger.warning(f"[DEBUG] Alternative Decodierung (skip_special_tokens=False): {repr(response_alt)}")
+                    logger.warning(f"[DEBUG] Alternative Decodierung (skip_special_tokens=False): {repr(response_alt[:100])}")
                     if bool(re.search(r'[a-zA-ZäöüßÄÖÜ]', response_alt)) and len(response_alt.strip()) >= 5:
                         response = response_alt
                         logger.info(f"[FIX] Alternative Decodierung hat bessere Response gefunden, verwende diese")
+                    else:
+                        logger.warning(f"[WARNING] Alternative Decodierung hat auch keine gültige Response gefunden. Validierung wird später prüfen und ggf. Retry auslösen.")
                 logger.debug(f"[DEBUG] Decoding dauerte {decode_duration:.2f} Sekunden")
                 logger.model_gen(f"Decoding abgeschlossen, Länge: {len(response)} Zeichen", level="debug")
                 
@@ -1525,6 +1861,7 @@ class ModelManager:
             
             # Bestimme Modell-Typ
             is_mistral = "mistral" in self.current_model_id.lower() if self.current_model_id else False
+            is_qwen = self.current_model_id and "qwen" in self.current_model_id.lower()
             
             # EOS-Token-IDs
             eos_token_id = self.tokenizer.eos_token_id
@@ -1546,29 +1883,41 @@ class ModelManager:
             model_limits = {
                 "mistral": 4096,  # Mistral hat typischerweise 4096 Token Kontext
                 "phi-3": 8192,    # Phi-3 hat 8192 Token Kontext
+                "qwen": 32768,    # Qwen-2.x hat 32k Token Kontext
+                "qwen2": 32768,
                 "default": 2048   # Standard-Limit
             }
             
             # Bestimme Modell-Limit
-            model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
-            model_max_context = model_limits.get(model_name, model_limits["default"])
+            if self.current_model_id and "qwen" in self.current_model_id.lower():
+                model_max_context = model_limits.get("qwen", model_limits["default"])
+            else:
+                model_name = self.current_model_id.lower().split("-")[0] if self.current_model_id else "default"
+                model_max_context = model_limits.get(model_name, model_limits["default"])
             
-            # Berechne max_new_tokens korrekt (verfügbarer Platz für neue Tokens)
-            # WICHTIG: Verwende max_length direkt (ohne hartes Limit), damit User-Einstellungen respektiert werden
+            # Verwende max_length als gewünschte Ausgabelänge (max_new_tokens)
+            desired_new_tokens = max_length
+            if desired_new_tokens >= model_max_context:
+                desired_new_tokens = max(1, model_max_context - 1)
+                logger.warning(f"[Stream] max_length zu hoch für Modell-Kontext. Setze gewünschte Ausgabelänge auf {desired_new_tokens} Tokens (Modell-Limit: {model_max_context}).")
+            
+            max_input_tokens = model_max_context - desired_new_tokens
+            
+            # Berechne max_new_tokens korrekt (max_length = gewünschte Ausgabelänge)
             max_new_tokens = min(
-                max_length - input_length,  # Verfügbarer Platz basierend auf max_length (User-Einstellung)
-                model_max_context - input_length  # Verfügbarer Platz basierend auf Modell-Limit
+                desired_new_tokens,
+                model_max_context - input_length
             )
             
             # Validierung: Prüfe ob max_new_tokens zu klein ist (BEVOR wir es auf 1 setzen)
             if max_new_tokens <= 0:
-                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubt: {max_length}, Modell-Limit: {model_max_context}")
+                raise ValueError(f"Input ist zu lang ({input_length} Tokens). Maximal erlaubte Eingabe: {max_input_tokens}, Modell-Limit: {model_max_context}")
             
             # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
             max_new_tokens = max(1, max_new_tokens)
             
             # Logging für Debugging
-            logger.info(f"Stream - Input-Länge: {input_length}, max_length: {max_length}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
+            logger.info(f"Stream - Input-Länge: {input_length}, gewünschte Ausgabelänge: {desired_new_tokens}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
             
             repetition_penalty = 1.3 if is_mistral else 1.2
             
@@ -1586,9 +1935,11 @@ class ModelManager:
             streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
             
             # Generiere in separatem Thread
+            max_time_seconds = max(5.0, min(30.0, max_new_tokens / 4))
             generation_kwargs = {
                 **inputs,
                 "max_new_tokens": max_new_tokens,
+                "max_time": max_time_seconds,
                 "temperature": temperature if temperature > 0 else (0.7 if is_mistral else None),
                 "do_sample": temperature > 0,
                 "top_p": 0.9 if temperature > 0 else None,

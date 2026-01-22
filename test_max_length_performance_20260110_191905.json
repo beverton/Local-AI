@@ -1,0 +1,93 @@
+{
+  "test_info": {
+    "timestamp": "20260110_191905",
+    "prompt": "Schreibe ein Gedicht mit mindestens 5 Strophen zum Thema: Menschen mit K.I. landen in einer Utopie. Das Gedicht sollte kreativ, inspirierend und detailliert sein.",
+    "temperature": 0.7,
+    "test_values": [
+      200,
+      500,
+      800,
+      1000,
+      1500,
+      2000,
+      3000,
+      4000
+    ]
+  },
+  "results": [
+    {
+      "max_length": 200,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.007905960083
+    },
+    {
+      "max_length": 500,
+      "success": true,
+      "elapsed_time": 131.1577820777893,
+      "response_length": 168,
+      "estimated_tokens": 42,
+      "tokens_per_second": 0.3202249941607729,
+      "is_complete": true,
+      "response_preview": "In einer Welt, wo Maschinen lernen,\nWo Künstliche Intelligenz sich entfaltet,\nSchwebt eine Hoffnung im Dunst des Morgens,\nMenschheit teilt die Freude eines neuen Tales."
+    },
+    {
+      "max_length": 800,
+      "success": false,
+      "error": "Internal Server Error",
+      "elapsed_time": 217.89822554588318
+    },
+    {
+      "max_length": 1000,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.01130199432373
+    },
+    {
+      "max_length": 1500,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.00585103034973
+    },
+    {
+      "max_length": 2000,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.0023674964905
+    },
+    {
+      "max_length": 3000,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.0056731700897
+    },
+    {
+      "max_length": 4000,
+      "success": false,
+      "error": "Timeout",
+      "elapsed_time": 300.0141384601593
+    }
+  ],
+  "analysis": {
+    "total_tests": 8,
+    "successful_tests": 1,
+    "best_performance": {
+      "max_length": 500,
+      "tokens_per_second": 0.3202249941607729,
+      "elapsed_time": 131.1577820777893
+    },
+    "best_balance": {
+      "max_length": 500,
+      "tokens_per_second": 0.3202249941607729,
+      "elapsed_time": 131.1577820777893,
+      "is_complete": true
+    },
+    "average_tokens_per_second": 0.3202249941607729,
+    "recommendation": {
+      "for_short_answers": 500,
+      "for_medium_answers": 500,
+      "for_long_answers": 500
+    }
+  },
+  "total_test_time": 2184.1072747707367
+}

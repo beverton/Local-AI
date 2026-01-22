@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-01-15T11:19:50.326065",
+  "base_url": "http://127.0.0.1:8000",
+  "conversation_id": "96b8aaaa-12c9-4aed-b938-4077cba71a55",
+  "request_timeout_seconds": 60,
+  "max_run_seconds": 300,
+  "tests": [
+    {
+      "id": "short_ok",
+      "max_length": 32,
+      "response_preview": "",
+      "analysis": {
+        "char_count": 0,
+        "word_count": 0,
+        "warnings": []
+      }
+    },
+    {
+      "id": "file_write_short",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "simple_points",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "medium_explain",
+      "error": "timeout_after_60s",
+      "timeout": true
+    },
+    {
+      "id": "long_structured",
+      "error": "timeout_after_60s",
+      "timeout": true
+    }
+  ],
+  "conversation_file": "G:\\04-CODING\\Local Ai\\data\\conversations\\96b8aaaa-12c9-4aed-b938-4077cba71a55.json"
+}

@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-01-15T10:38:59.939885",
+  "base_url": "http://127.0.0.1:8000",
+  "conversation_id": "15de1ea2-4535-4d89-a927-0ac2d63e0238",
+  "request_timeout_seconds": 90,
+  "tests": [
+    {
+      "id": "short_ok",
+      "error": "500 Server Error: Internal Server Error for url: http://127.0.0.1:8000/chat"
+    },
+    {
+      "id": "file_write_short",
+      "error": "timeout_after_90s",
+      "timeout": true
+    },
+    {
+      "id": "simple_points",
+      "error": "timeout_after_90s",
+      "timeout": true
+    },
+    {
+      "id": "medium_explain",
+      "error": "timeout_after_90s",
+      "timeout": true
+    },
+    {
+      "id": "long_structured",
+      "error": "timeout_after_90s",
+      "timeout": true
+    },
+    {
+      "id": "complex_checklist",
+      "error": "timeout_after_90s",
+      "timeout": true
+    }
+  ],
+  "conversation_file": "G:\\04-CODING\\Local Ai\\data\\conversations\\15de1ea2-4535-4d89-a927-0ac2d63e0238.json"
+}

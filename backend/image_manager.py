@@ -127,22 +127,27 @@ class ImageManager:
         self.pipeline = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.performance_settings = self._load_performance_settings()
+        self.gpu_allocation_budget_gb: Optional[float] = None  # GPU budget in GB for this model
         self.instance_id = id(self)  # Eindeutige ID für diese Instanz
         logger.info(f"Image Manager - Verwende Device: {self.device} (Instanz-ID: {self.instance_id})")
     
+    def set_gpu_allocation_budget(self, budget_gb: Optional[float]):
+        """Setzt das GPU-Allokations-Budget für dieses Modell (in GB)"""
+        self.gpu_allocation_budget_gb = budget_gb
+        if budget_gb is not None:
+            logger.info(f"GPU-Allokations-Budget für Image-Modell gesetzt: {budget_gb:.2f}GB")
+    
     def _load_performance_settings(self) -> Dict[str, Any]:
-        """Lädt Performance-Einstellungen"""
+        """Lädt Performance-Einstellungen (delegiert an zentrales Modul)"""
         try:
-            perf_settings_path = os.path.join(os.path.dirname(os.path.dirname(self.config_path)), "data", "performance_settings.json")
-            if os.path.exists(perf_settings_path):
-                with open(perf_settings_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+            from settings_loader import load_performance_settings
+            return load_performance_settings()
         except Exception as e:
             logger.warning(f"Fehler beim Laden der Performance-Einstellungen: {e}")
-        return {
-            "gpu_optimization": "balanced",
-            "disable_cpu_offload": False
-        }
+            return {
+                "gpu_optimization": "balanced",
+                "disable_cpu_offload": False
+            }
     
     def _load_config(self) -> Dict[str, Any]:
         """Lädt die Konfiguration aus config.json"""
@@ -609,36 +614,53 @@ class ImageManager:
                     logger.warning(f"Fehler beim Verschieben auf GPU: {gpu_error}, verwende CPU")
                     self.device = "cpu"
                     
-                    # GPU-Optimierungen basierend auf Performance-Einstellungen
+                    # GPU-Optimierungen basierend auf Performance-Einstellungen und GPU-Allokation
                     gpu_opt = self.performance_settings.get("gpu_optimization", "balanced")
                     disable_offload = self.performance_settings.get("disable_cpu_offload", False)
                     
-                    logger.info(f"Performance-Einstellungen: gpu_optimization={gpu_opt}, disable_cpu_offload={disable_offload}")
-                    
-                    if gpu_opt == "speed" and not disable_offload:
-                        # Maximale Geschwindigkeit: Deaktiviere CPU-Offloading und Attention-Slicing
-                        logger.info("GPU-Optimierung: Maximale Geschwindigkeit (kein CPU-Offloading, kein Attention-Slicing)")
-                        # Nichts aktivieren = maximale GPU-Nutzung
-                    elif gpu_opt == "memory":
-                        # Speicher-effizient: Aktiviere CPU-Offloading
-                        if hasattr(self.pipeline, 'enable_model_cpu_offload') and not disable_offload:
-                            logger.info("Aktiviere CPU-Offloading für besseren Speicherverbrauch...")
+                    # Prüfe GPU-Allokations-Budget
+                    has_budget_limit = self.gpu_allocation_budget_gb is not None and self.gpu_allocation_budget_gb > 0
+                    if has_budget_limit:
+                        # GPU-Budget ist gesetzt - verwende speicher-effiziente Einstellungen
+                        logger.info(f"GPU-Allokations-Budget aktiv ({self.gpu_allocation_budget_gb:.2f}GB) - aktiviere speicher-effiziente Optimierungen")
+                        if hasattr(self.pipeline, 'enable_attention_slicing'):
+                            self.pipeline.enable_attention_slicing()
+                            logger.info("Attention-Slicing aktiviert (GPU-Budget)")
+                        if hasattr(self.pipeline, 'enable_vae_slicing'):
+                            self.pipeline.enable_vae_slicing()
+                            logger.info("VAE-Slicing aktiviert (GPU-Budget)")
+                        # CPU-Offloading nur wenn Budget sehr klein ist
+                        if self.gpu_allocation_budget_gb < 8.0 and hasattr(self.pipeline, 'enable_model_cpu_offload') and not disable_offload:
                             self.pipeline.enable_model_cpu_offload()
-                            logger.info("CPU-Offloading aktiviert")
-                        elif hasattr(self.pipeline, 'enable_attention_slicing'):
-                            logger.info("Aktiviere Attention-Slicing...")
-                            self.pipeline.enable_attention_slicing()
-                            logger.info("Attention-Slicing aktiviert")
+                            logger.info("CPU-Offloading aktiviert (kleines GPU-Budget)")
                     else:
-                        # Balanced: Standard-Optimierungen
-                        if hasattr(self.pipeline, 'enable_attention_slicing') and not disable_offload:
-                            logger.info("Aktiviere Attention-Slicing (balanced)...")
-                            self.pipeline.enable_attention_slicing()
-                            logger.info("Attention-Slicing aktiviert (balanced)")
-                    
-                    # Wenn CPU-Offloading deaktiviert werden soll
-                    if disable_offload:
-                        logger.info("CPU-Offloading ist deaktiviert - maximale GPU-Nutzung")
+                        # Kein Budget-Limit - verwende normale Optimierungen
+                        logger.info(f"Performance-Einstellungen: gpu_optimization={gpu_opt}, disable_cpu_offload={disable_offload}")
+                        
+                        if gpu_opt == "speed" and not disable_offload:
+                            # Maximale Geschwindigkeit: Deaktiviere CPU-Offloading und Attention-Slicing
+                            logger.info("GPU-Optimierung: Maximale Geschwindigkeit (kein CPU-Offloading, kein Attention-Slicing)")
+                            # Nichts aktivieren = maximale GPU-Nutzung
+                        elif gpu_opt == "memory":
+                            # Speicher-effizient: Aktiviere CPU-Offloading
+                            if hasattr(self.pipeline, 'enable_model_cpu_offload') and not disable_offload:
+                                logger.info("Aktiviere CPU-Offloading für besseren Speicherverbrauch...")
+                                self.pipeline.enable_model_cpu_offload()
+                                logger.info("CPU-Offloading aktiviert")
+                            elif hasattr(self.pipeline, 'enable_attention_slicing'):
+                                logger.info("Aktiviere Attention-Slicing...")
+                                self.pipeline.enable_attention_slicing()
+                                logger.info("Attention-Slicing aktiviert")
+                        else:
+                            # Balanced: Standard-Optimierungen
+                            if hasattr(self.pipeline, 'enable_attention_slicing') and not disable_offload:
+                                logger.info("Aktiviere Attention-Slicing (balanced)...")
+                                self.pipeline.enable_attention_slicing()
+                                logger.info("Attention-Slicing aktiviert (balanced)")
+                        
+                        # Wenn CPU-Offloading deaktiviert werden soll
+                        if disable_offload:
+                            logger.info("CPU-Offloading ist deaktiviert - maximale GPU-Nutzung")
                     
                     # Prüfe ob Pipeline wirklich auf GPU ist
                     if hasattr(self.pipeline, 'unet'):

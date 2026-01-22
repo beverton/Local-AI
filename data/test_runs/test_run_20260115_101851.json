@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-01-15T10:06:50.466638",
+  "base_url": "http://127.0.0.1:8000",
+  "conversation_id": "8187ee3b-7202-4d0a-8694-e5d1554b50b0",
+  "tests": [
+    {
+      "id": "short_ok",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    },
+    {
+      "id": "file_write_short",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    },
+    {
+      "id": "simple_points",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    },
+    {
+      "id": "medium_explain",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    },
+    {
+      "id": "long_structured",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    },
+    {
+      "id": "complex_checklist",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Read timed out. (read timeout=120)"
+    }
+  ],
+  "conversation_file": "G:\\04-CODING\\Local Ai\\backend\\data\\conversations\\8187ee3b-7202-4d0a-8694-e5d1554b50b0.json"
+}

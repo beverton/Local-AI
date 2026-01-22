@@ -69,26 +69,35 @@ except:
 # Performance Settings Path
 PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
 
-def _load_performance_settings() -> Dict[str, Any]:
-    """Lädt Performance-Settings aus JSON-Datei"""
-    try:
-        if os.path.exists(PERFORMANCE_SETTINGS_FILE):
-            with open(PERFORMANCE_SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-                logger.info(f"[SETTINGS] Performance-Settings geladen von {PERFORMANCE_SETTINGS_FILE}: {settings}")
-                return settings
-        else:
-            logger.warning(f"[SETTINGS] Performance-Settings-Datei nicht gefunden: {PERFORMANCE_SETTINGS_FILE}")
-    except Exception as e:
-        logger.error(f"[SETTINGS] Fehler beim Laden der Performance-Settings: {e}", exc_info=True)
+# Import zentrales Settings-Loader-Modul
+from settings_loader import load_performance_settings
+
+def _load_quality_settings() -> Dict[str, Any]:
+    """Lädt Quality Settings aus JSON-Datei"""
+    settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "quality_settings.json")
     default_settings = {
-        "cpu_threads": 0,
-        "gpu_optimization": "balanced",
-        "disable_cpu_offload": False,
-        "max_length": 2048  # Default max_length
+        "web_validation": False,
+        "contradiction_check": False,
+        "hallucination_check": False,
+        "actuality_check": False,
+        "source_quality_check": False,
+        "completeness_check": False,
+        "auto_web_search": False
     }
-    logger.info(f"[SETTINGS] Verwende Default-Settings: {default_settings}")
+    
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                default_settings.update(loaded)
+    except Exception as e:
+        logger.debug(f"Konnte Quality Settings nicht laden: {e}")
+    
     return default_settings
+
+def _load_performance_settings() -> Dict[str, Any]:
+    """Lädt Performance-Settings aus JSON-Datei (delegiert an zentrales Modul)"""
+    return load_performance_settings()
 
 def _save_performance_settings(settings: Dict[str, Any]):
     """Speichert Performance-Settings in JSON-Datei"""
@@ -608,6 +617,107 @@ def _safe_delete_file(file_path: str, max_retries: int = 3, delay: float = 0.1):
 # Root-Endpoint wird später überschrieben wenn model_manager_dir existiert
 
 
+def calculate_gpu_allocation(force_primary_models: Optional[List[str]] = None, force_secondary_models: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Berechnet GPU-Allokation basierend auf geladenen Modellen.
+    
+    Returns:
+        Dict mit GPU-Allokations-Informationen:
+        - gpu_max_percent: Maximum GPU usage percentage
+        - primary_budget_percent: Primary model budget percentage
+        - secondary_budget_percent: Secondary model budget percentage (auto)
+        - primary_models: Liste der geladenen Primary-Modelle
+        - secondary_models: Liste der geladenen Secondary-Modelle
+        - allocations: Dict mit max_memory_gb pro Modell-Typ
+    """
+    import torch
+    
+    # Lade Performance-Settings
+    perf_settings = _load_performance_settings()
+    gpu_max_percent = perf_settings.get("gpu_max_percent", 90.0)
+    primary_budget_percent = perf_settings.get("primary_budget_percent")
+    
+    # Erkenne geladene Modelle
+    primary_models = []
+    secondary_models = []
+    
+    if model_manager.is_model_loaded():
+        primary_models.append("text")
+    if image_manager and image_manager.is_model_loaded():
+        primary_models.append("image")
+    if whisper_manager.is_model_loaded():
+        secondary_models.append("audio")
+    
+    # Add forced models (for models being loaded)
+    if force_primary_models:
+        for model_type in force_primary_models:
+            if model_type not in primary_models:
+                primary_models.append(model_type)
+    if force_secondary_models:
+        for model_type in force_secondary_models:
+            if model_type not in secondary_models:
+                secondary_models.append(model_type)
+    
+    # Berechne Budgets
+    has_secondary = len(secondary_models) > 0
+    has_primary = len(primary_models) > 0
+    
+    # Wenn kein Primary-Budget gesetzt, berechne automatisch
+    if primary_budget_percent is None:
+        if has_secondary:
+            # Auto-Budget: 70% für Primary, 20% für Secondary (bleibt unter 90%)
+            primary_budget_percent = 70.0
+        else:
+            # Kein Secondary: Primary kann bis zu max_percent nutzen
+            primary_budget_percent = gpu_max_percent
+    
+    # Validiere Primary-Budget
+    if primary_budget_percent > gpu_max_percent:
+        primary_budget_percent = gpu_max_percent
+    
+    # Secondary-Budget ist der Rest (aber mindestens 20% wenn Secondary geladen)
+    if has_secondary:
+        secondary_budget_percent = max(20.0, gpu_max_percent - primary_budget_percent)
+    else:
+        secondary_budget_percent = 0.0
+    
+    # Berechne max_memory_gb pro Modell-Typ
+    allocations = {}
+    if torch.cuda.is_available():
+        gpu_total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        
+        # Primary-Modelle teilen sich das Primary-Budget gleichmäßig
+        if has_primary:
+            primary_memory_gb = (gpu_total_gb * primary_budget_percent / 100.0)
+            if len(primary_models) > 1:
+                # Gleichmäßige Aufteilung bei mehreren Primary-Modellen
+                per_primary_gb = primary_memory_gb / len(primary_models)
+                for model_type in primary_models:
+                    allocations[model_type] = round(per_primary_gb, 2)
+            else:
+                allocations[primary_models[0]] = round(primary_memory_gb, 2)
+        
+        # Secondary-Modelle teilen sich das Secondary-Budget
+        if has_secondary:
+            secondary_memory_gb = (gpu_total_gb * secondary_budget_percent / 100.0)
+            if len(secondary_models) > 1:
+                per_secondary_gb = secondary_memory_gb / len(secondary_models)
+                for model_type in secondary_models:
+                    allocations[model_type] = round(per_secondary_gb, 2)
+            else:
+                allocations[secondary_models[0]] = round(secondary_memory_gb, 2)
+    
+    return {
+        "gpu_max_percent": gpu_max_percent,
+        "primary_budget_percent": primary_budget_percent,
+        "secondary_budget_percent": secondary_budget_percent if has_secondary else None,
+        "primary_models": primary_models,
+        "secondary_models": secondary_models,
+        "allocations": allocations,
+        "gpu_total_gb": round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2) if torch.cuda.is_available() else None
+    }
+
+
 @app.get("/status")
 async def get_status():
     """Gibt Status aller Modelle zurück (inkl. Memory-Informationen)"""
@@ -630,13 +740,21 @@ async def get_status():
             gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)  # GB
             gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
             gpu_memory_free = gpu_memory_total - gpu_memory_reserved
+            if gpu_memory_reserved > gpu_memory_total:
+                logger.model_load(
+                    f"GPU reserved memory exceeds total ({gpu_memory_reserved:.2f}GB > {gpu_memory_total:.2f}GB); clamping usage.",
+                    level="warning"
+                )
             
             text_status["memory"] = {
                 "gpu_allocated_gb": round(gpu_memory_allocated, 2),
                 "gpu_reserved_gb": round(gpu_memory_reserved, 2),
                 "gpu_total_gb": round(gpu_memory_total, 2),
-                "gpu_free_gb": round(gpu_memory_free, 2),
-                "gpu_usage_percent": round((gpu_memory_reserved / gpu_memory_total) * 100, 1) if gpu_memory_total > 0 else 0
+                "gpu_free_gb": round(max(0.0, gpu_memory_free), 2),
+                "gpu_usage_percent": min(
+                    100.0,
+                    round((gpu_memory_reserved / gpu_memory_total) * 100, 1) if gpu_memory_total > 0 else 0
+                )
             }
         except Exception as e:
             logger.model_load(f"Fehler beim Ermitteln der GPU-Memory-Info: {e}", level="warning")
@@ -660,10 +778,14 @@ async def get_status():
         "active_clients": get_active_clients("image", image_manager.get_current_model() or "") if (image_manager and image_manager.is_model_loaded()) else []
     }
     
+    # GPU-Allokation berechnen
+    gpu_allocation = calculate_gpu_allocation()
+    
     return {
         "text_model": text_status,
         "audio_model": audio_status,
         "image_model": image_status,
+        "gpu_allocation": gpu_allocation,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -713,7 +835,7 @@ async def health_check():
 
 # Text Model Endpoints
 
-def _load_text_model_async(model_id: str):
+def _load_text_model_async(model_id: str, force_primary_models: Optional[List[str]] = None, force_secondary_models: Optional[List[str]] = None):
     """Lädt ein Text-Modell asynchron"""
     try:
         logger.model_load(f"Starte asynchrones Laden: {model_id}")
@@ -742,6 +864,19 @@ def _load_text_model_async(model_id: str):
             loading_status["text"]["loading"] = False
             loading_status["text"]["error"] = error_msg
             return
+        
+        # Berechne GPU-Allokation und setze Budget für Text-Modell
+        gpu_allocation = calculate_gpu_allocation(
+            force_primary_models=force_primary_models or ["text"],
+            force_secondary_models=force_secondary_models
+        )
+        text_budget_gb = gpu_allocation.get("allocations", {}).get("text")
+        if text_budget_gb is not None:
+            model_manager.set_gpu_allocation_budget(text_budget_gb)
+            logger.model_load(f"GPU-Allokations-Budget für Text-Modell: {text_budget_gb}GB")
+        else:
+            # Kein Budget gesetzt - verwende Standard-Verhalten
+            model_manager.set_gpu_allocation_budget(None)
         
         logger.model_load("Rufe model_manager.load_model() auf...")
         start_time = time.time()
@@ -896,11 +1031,52 @@ async def load_audio_model(request: LoadModelRequest):
         # Speichere als zuletzt aktiviertes Modell
         save_last_active_model("audio", request.model_id)
         
-        success = whisper_manager.load_model(request.model_id)
-        if success:
-            return {"status": "success", "model_id": request.model_id, "message": "Modell geladen"}
+        # Wenn Text-Modell geladen ist, entlade es vor Whisper (mehr GPU-Spielraum)
+        current_text_model = model_manager.get_current_model() if model_manager.is_model_loaded() else None
+        if current_text_model:
+            logger.info(f"Whisper wird geladen - entlade Text-Modell temporär: {current_text_model}")
+            model_manager.unload_model()
+
+        # Berechne GPU-Allokation und setze Budget für Whisper
+        gpu_allocation = calculate_gpu_allocation(
+            force_primary_models=[],
+            force_secondary_models=["audio"]
+        )
+        audio_budget_gb = gpu_allocation.get("allocations", {}).get("audio")
+        if audio_budget_gb is not None:
+            whisper_manager.set_gpu_allocation_budget(audio_budget_gb)
+            logger.info(f"GPU-Allokations-Budget für Whisper: {audio_budget_gb}GB")
         else:
-            raise HTTPException(status_code=400, detail=f"Fehler beim Laden des Modells: {request.model_id}")
+            whisper_manager.set_gpu_allocation_budget(None)
+
+        try:
+            success = whisper_manager.load_model(request.model_id)
+            if success:
+                # Nach Whisper-Load: Text-Modell mit GPU-Budget neu laden (falls vorher aktiv)
+                if current_text_model and not loading_status["text"]["loading"]:
+                    logger.info(f"Whisper geladen - lade Text-Modell neu mit GPU-Budget: {current_text_model}")
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(
+                            model_load_executor,
+                            _load_text_model_async,
+                            current_text_model,
+                            ["text"],
+                            ["audio"]
+                        )
+                    except Exception as reload_error:
+                        logger.warning(f"Fehler beim Reload des Text-Modells nach Whisper-Load: {reload_error}")
+                return {"status": "success", "model_id": request.model_id, "message": "Modell geladen"}
+            else:
+                error_msg = f"Fehler beim Laden des Modells: {request.model_id} (load_model gab False zurück)"
+                logger.error(error_msg)
+                raise HTTPException(status_code=400, detail=error_msg)
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = f"Fehler beim Laden des Modells: {request.model_id}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise HTTPException(status_code=400, detail=error_msg)
     except Exception as e:
         logger.error(f"Fehler beim Laden des Audio-Modells: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -959,6 +1135,16 @@ def _load_image_model_async(model_id: str):
         
         logger.info(f"Starte asynchrones Laden des Image-Modells: {model_id}")
         logger.info(f"Thread: {threading.current_thread().name}, PID: {os.getpid()}")
+        
+        # Berechne GPU-Allokation und setze Budget für Image-Modell
+        gpu_allocation = calculate_gpu_allocation(force_primary_models=["image"])
+        image_budget_gb = gpu_allocation.get("allocations", {}).get("image")
+        if image_budget_gb is not None:
+            image_manager.set_gpu_allocation_budget(image_budget_gb)
+            logger.info(f"GPU-Allokations-Budget für Image-Modell: {image_budget_gb}GB")
+        else:
+            # Kein Budget gesetzt - verwende Standard-Verhalten
+            image_manager.set_gpu_allocation_budget(None)
         
         # Wrapper um load_model, um sicherzustellen dass Exceptions gefangen werden
         try:
@@ -1299,39 +1485,39 @@ async def chat(request: ChatRequest, http_request: Request):
             messages = [{"role": "user", "content": request.message}]
         logger.info(f"[CHAT] Verarbeite {len(messages)} Messages")
         
-        # Bestimme Profil - FORCE DEFAULT für Debugging
-        # Temporär: Immer "default" verwenden, um Probleme zu isolieren
-        if request.profile is None:
-            profile_name = "default"
-            logger.info(f"[CHAT] Kein Profil angegeben, verwende 'default'")
+        # WICHTIG: Profile sind vorübergehend deaktiviert - werden zentral im Model Service verwaltet
+        # Profile-Logik bleibt auskommentiert für zukünftige Verwendung (Persönlichkeiten, etc.)
+        # if request.profile is None:
+        #     profile_name = "default"
+        #     logger.info(f"[CHAT] Kein Profil angegeben, verwende 'default'")
+        # else:
+        #     profile_name = get_profile_for_model(model_id, request.profile)
+        #     logger.info(f"[CHAT] Profil angegeben: '{request.profile}' -> verwendet: '{profile_name}'")
+        # profile_params = get_profile_parameters(profile_name)
+        # logger.info(f"[CHAT] Profil-Parameter geladen: {profile_params}")
+        
+        # Parameter-Logik: Request > Persistent Setting > Default
+        # WICHTIG: Profile werden nicht mehr verwendet - alle Parameter kommen aus Settings
+        perf_settings = _load_performance_settings()
+        
+        # temperature: Request > Persistent Setting > Default (0.6)
+        if request.temperature is not None:
+            effective_temperature = request.temperature
+            logger.info(f"[CHAT] temperature aus Request: {effective_temperature}")
         else:
-            profile_name = get_profile_for_model(model_id, request.profile)
-            logger.info(f"[CHAT] Profil angegeben: '{request.profile}' -> verwendet: '{profile_name}'")
+            effective_temperature = perf_settings.get("temperature", 0.6)
+            logger.info(f"[CHAT] temperature aus Performance Settings: {effective_temperature}")
         
-        profile_params = get_profile_parameters(profile_name)
-        logger.info(f"[CHAT] Profil-Parameter geladen: {profile_params}")
-        
-        # Verwende Profil-Parameter, wenn nicht explizit angegeben
-        effective_temperature = request.temperature if request.temperature is not None else profile_params.get("temperature", 0.3)
-        
-        # max_length: Request > Persistent Setting > Profil > Default
-        # WICHTIG: Persistent Setting hat Priorität über Profil, da User es explizit gesetzt hat
+        # max_length: Request > Persistent Setting > Default (512)
         if request.max_length is not None:
             effective_max_length = request.max_length
             logger.info(f"[CHAT] max_length aus Request: {effective_max_length}")
         else:
-            # Verwende persistent gespeicherte max_length Setting (hat Priorität über Profil)
-            perf_settings = _load_performance_settings()
-            # WICHTIG: Prüfe explizit ob max_length in Settings existiert (kann auch 0 sein, was falsch wäre)
-            if "max_length" in perf_settings and perf_settings["max_length"] is not None:
-                effective_max_length = perf_settings["max_length"]
-                logger.info(f"[CHAT] max_length aus Performance Settings: {effective_max_length} (Profil hätte: {profile_params.get('max_length', 2048)})")
-            else:
-                # Falls nicht gesetzt, verwende Profil oder Default
-                effective_max_length = profile_params.get("max_length", 2048)
-                logger.info(f"[CHAT] max_length nicht in Performance Settings, verwende Profil/Default: {effective_max_length}")
+            effective_max_length = perf_settings.get("max_length", 512)
+            logger.info(f"[CHAT] max_length aus Performance Settings: {effective_max_length}")
         
-        is_coding = profile_params.get("is_coding", False)
+        # is_coding wird nicht mehr aus Profilen verwendet (vorübergehend deaktiviert)
+        is_coding = False
         
         logger.info(f"[CHAT] Finale Parameter: temperature={effective_temperature}, max_length={effective_max_length}, is_coding={is_coding}")
         
@@ -1341,21 +1527,38 @@ async def chat(request: ChatRequest, http_request: Request):
             # Bestimme Antwort-Sprache
             response_language = request.language or "de"  # Default: Deutsch
             
-            # Prüfe ob Profil einen modifizierten System-Prompt hat
-            profile_system_prompt = get_profile_system_prompt(model_id, profile_name, response_language)
-            
-            if profile_system_prompt:
-                # Verwende Profil-spezifischen System-Prompt
-                system_prompt = profile_system_prompt
-            elif "mistral" in model_id.lower():
+            # WICHTIG: Profile sind deaktiviert - verwende Standard-System-Prompt
+            # profile_system_prompt = get_profile_system_prompt(model_id, profile_name, response_language)
+            # if profile_system_prompt:
+            #     system_prompt = profile_system_prompt
+            # elif "mistral" in model_id.lower():
+            if "mistral" in model_id.lower():
                 if response_language == "en":
                     system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words. Answer ONLY the asked question, no additional explanations or technical details."
                 else:  # Deutsch (de) oder andere
                     system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern. Antworte NUR auf die gestellte Frage, keine zusätzlichen Erklärungen oder technischen Details."
             elif "qwen" in model_id.lower():
                 # Qwen: Hybrid-Prompt (kann chatten UND coden)
+                # Lade Quality Settings um zu prüfen ob Web-Search aktiviert ist
+                quality_settings = _load_quality_settings()
+                web_search_enabled = quality_settings.get("auto_web_search", False)
+                
                 if response_language == "en":
-                    system_prompt = """You are a helpful AI assistant who can both answer questions and write code.
+                    tools_list = """AVAILABLE TOOLS:
+- write_file(file_path, content): Creates or overwrites a file. Use this tool when the user wants to create a file.
+- read_file(file_path): Reads a file.
+- list_directory(directory_path): Lists directory contents."""
+                    
+                    if web_search_enabled:
+                        tools_list += "\n- web_search(query): Performs a web search."
+                    
+                    system_prompt = f"""You are a helpful AI assistant who can both answer questions and write code.
+
+{tools_list}
+
+IMPORTANT: If the user wants to create a file, use the write_file tool.
+{"IMPORTANT: Do NOT generate URLs or links. Web search is disabled." if not web_search_enabled else ""}
+
 - For questions: Answer clearly and directly
 - For code requests: Use Markdown code blocks with language tags (```python, ```javascript, etc.)
 - Only use code blocks when code is requested
@@ -1363,7 +1566,24 @@ async def chat(request: ChatRequest, http_request: Request):
 - Explain code briefly if needed
 IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."""
                 else:  # Deutsch (de) oder andere
-                    system_prompt = """Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+                    tools_list = """VERFÜGBARE TOOLS (werden automatisch genutzt wenn du sie anfragst):
+- read_file(file_path): Liest eine Datei. Formuliere: "Lies die Datei X", "Prüfe die Datei Y", "Schaue in die Datei Z", "Nachschauen in X", "Analysiere Y"
+- write_file(file_path, content): Erstellt oder überschreibt eine Datei. Formuliere: "Schreibe in die Datei X den Inhalt Y"
+- list_directory(directory_path): Listet Verzeichnis-Inhalt auf. Formuliere: "Zeige mir den Inhalt von Ordner X"""
+                    
+                    if web_search_enabled:
+                        tools_list += "\n- web_search(query): Führt eine Websuche durch."
+                    
+                    web_search_warning = "\n\nWICHTIG: Generiere KEINE URLs oder Links. Web-Suche ist deaktiviert." if not web_search_enabled else ""
+                    
+                    system_prompt = f"""Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+
+{tools_list}
+
+WICHTIG: Wenn du eine Datei lesen, einen Ordner durchsuchen oder Code analysieren musst, 
+formuliere deine Anfrage klar mit "Lies", "Prüfe", "Schaue in", "Nachschauen in", "Analysiere", "Zeige mir", etc.
+Die Tools werden automatisch erkannt und ausgeführt. Du kannst auch sagen: "Kannst du in der Datei X nachschauen?" oder "Prüfe die Datei Y".{web_search_warning}
+
 - Bei Fragen: Antworte klar und direkt
 - Bei Code-Anfragen: Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
 - Verwende Code-Blocks nur wenn Code gefragt ist
@@ -1423,9 +1643,20 @@ WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt ode
                         # Future läuft immer noch - wirklich Timeout
                         generation_duration = time.time() - generation_start_time
                         logger.error(f"[DEBUG] Generierung TIMEOUT nach {generation_duration:.2f} Sekunden (Timeout: {generation_timeout}s)")
+                        
+                        # WICHTIG: Versuche Future abzubrechen (verhindert dass sie weiterläuft)
+                        # Hinweis: ThreadPoolExecutor Futures können nicht abgebrochen werden, wenn sie bereits laufen
+                        # Aber wir versuchen es trotzdem für den Fall, dass sie noch nicht gestartet wurde
+                        if not future.done():
+                            cancelled = future.cancel()
+                            if cancelled:
+                                logger.info(f"[DEBUG] Future erfolgreich abgebrochen")
+                            else:
+                                logger.warning(f"[DEBUG] Future konnte nicht abgebrochen werden (läuft bereits im Thread)")
+                        
                         raise HTTPException(
                             status_code=504, 
-                            detail=f"Generierung hat zu lange gedauert ({generation_duration:.1f}s). Möglicherweise ist die GPU überlastet (z.B. durch ein laufendes Spiel)."
+                            detail=f"Generierung hat zu lange gedauert ({generation_duration:.1f}s). Möglicherweise ist die GPU überlastet (z.B. durch ein laufendes Spiel). Die Generierung läuft möglicherweise noch im Hintergrund."
                         )
                 
         except HTTPException:
@@ -1454,6 +1685,8 @@ WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt ode
         
         # DEBUG: Logge Response vor Rückgabe
         logger.info(f"[CHAT] Response generiert: Länge={len(response_text)} Zeichen, Vorschau: {response_text[:100]}...")
+        # DEBUG: Logge vollständige Response für Debugging
+        logger.info(f"[CHAT] VOLLSTÄNDIGE Response-Text: {repr(response_text)}")
         
         response_dict = {
             "response": response_text,
@@ -1462,6 +1695,8 @@ WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt ode
         }
         
         logger.info(f"[CHAT] Response-Dict erstellt: response={len(response_text)} chars, model_id={model_id}, conversation_id={request.conversation_id}")
+        # DEBUG: Logge vollständige Response im Dict
+        logger.info(f"[CHAT] VOLLSTÄNDIGE Response im Dict: {repr(response_dict.get('response', ''))}")
         
         return response_dict
     except HTTPException:
@@ -1748,6 +1983,16 @@ class MaxLengthSettingsResponse(BaseModel):
     default: int
     description: Optional[str] = None
 
+class TemperatureSettingsRequest(BaseModel):
+    temperature: float
+
+class TemperatureSettingsResponse(BaseModel):
+    temperature: float
+    min: float
+    max: float
+    default: float
+    description: Optional[str] = None
+
 def _load_mcp_settings() -> Dict[str, Any]:
     """Lädt MCP-Einstellungen"""
     default_settings = {
@@ -1863,6 +2108,51 @@ async def set_max_length_settings(request: MaxLengthSettingsRequest):
         min=limits["min"],
         max=limits["max"],
         default=limits["default"]
+    )
+
+# Temperature Settings Endpoints
+@app.get("/settings/temperature")
+async def get_temperature_settings():
+    """Gibt aktuelle temperature Settings und Limits zurück"""
+    settings = _load_performance_settings()
+    current_temperature = settings.get("temperature", 0.6)
+    
+    return TemperatureSettingsResponse(
+        temperature=current_temperature,
+        min=0.0,
+        max=2.0,
+        default=0.6
+    )
+
+@app.put("/settings/temperature")
+async def set_temperature_settings(request: TemperatureSettingsRequest):
+    """Setzt temperature Setting (persistent)"""
+    # Validiere temperature
+    if request.temperature < 0.0:
+        raise HTTPException(
+            status_code=400,
+            detail="temperature muss mindestens 0.0 sein"
+        )
+    if request.temperature > 2.0:
+        raise HTTPException(
+            status_code=400,
+            detail="temperature darf maximal 2.0 sein"
+        )
+    
+    # Lade aktuelle Settings
+    settings = _load_performance_settings()
+    settings["temperature"] = request.temperature
+    
+    # Speichere persistent
+    _save_performance_settings(settings)
+    
+    logger.info(f"temperature Setting gespeichert: {request.temperature} (Min: 0.0, Max: 2.0)")
+    
+    return TemperatureSettingsResponse(
+        temperature=request.temperature,
+        min=0.0,
+        max=2.0,
+        default=0.6
     )
 
 # Restart Endpoint

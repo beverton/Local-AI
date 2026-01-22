@@ -25,6 +25,7 @@ const modelStatusText = document.getElementById('modelStatusText');
 const modelStatusAudio = document.getElementById('modelStatusAudio');
 const modelStatusImage = document.getElementById('modelStatusImage');
 const chatTitle = document.getElementById('chatTitle');
+const chatTitleInput = document.getElementById('chatTitleInput');
 const statusText = document.getElementById('statusText');
 const statusTextValue = document.getElementById('statusTextValue');
 const statusImageValue = document.getElementById('statusImageValue');
@@ -49,6 +50,16 @@ const cpuThreadsValue = document.getElementById('cpuThreadsValue');
 const gpuOptimizationSelect = document.getElementById('gpuOptimizationSelect');
 const disableCpuOffload = document.getElementById('disableCpuOffload');
 const btnApplyPerformance = document.getElementById('btnApplyPerformance');
+const primaryBudgetSlider = document.getElementById('primaryBudgetSlider');
+const primaryBudgetValue = document.getElementById('primaryBudgetValue');
+const gpuAllocationStatus = document.getElementById('gpuAllocationStatus');
+const sidebarPrimaryBudget = document.getElementById('sidebarPrimaryBudget');
+const sidebarSecondaryBudget = document.getElementById('sidebarSecondaryBudget');
+const sidebarLoadedModels = document.getElementById('sidebarLoadedModels');
+const gpuMaxPercent = document.getElementById('gpuMaxPercent');
+const gpuPrimaryBudget = document.getElementById('gpuPrimaryBudget');
+const gpuSecondaryBudget = document.getElementById('gpuSecondaryBudget');
+const gpuLoadedModels = document.getElementById('gpuLoadedModels');
 const chatInputContainer = document.getElementById('chatInputContainer');
 const imageInputContainer = document.getElementById('imageInputContainer');
 const imagePromptInput = document.getElementById('imagePromptInput');
@@ -162,10 +173,11 @@ async function loadQualitySettings() {
         const qualityHallucinationCheck = document.getElementById('qualityHallucinationCheck');
         const qualityAutoWebSearch = document.getElementById('qualityAutoWebSearch');
         
-        if (qualityWebValidation) qualityWebValidation.checked = settings.web_validation ?? true;
-        if (qualityContradictionCheck) qualityContradictionCheck.checked = settings.contradiction_check ?? true;
-        if (qualityHallucinationCheck) qualityHallucinationCheck.checked = settings.hallucination_check ?? true;
-        if (qualityAutoWebSearch) qualityAutoWebSearch.checked = settings.auto_web_search ?? true;
+        // Verwende explizite Defaults: false wenn nicht gesetzt (nicht true!)
+        if (qualityWebValidation) qualityWebValidation.checked = settings.web_validation ?? false;
+        if (qualityContradictionCheck) qualityContradictionCheck.checked = settings.contradiction_check ?? false;
+        if (qualityHallucinationCheck) qualityHallucinationCheck.checked = settings.hallucination_check ?? false;
+        if (qualityAutoWebSearch) qualityAutoWebSearch.checked = settings.auto_web_search ?? false;
     } catch (error) {
         console.error('Fehler beim Laden der Quality Settings:', error);
     }
@@ -181,10 +193,10 @@ async function saveQualitySettings() {
         await apiCall('/quality/settings', {
             method: 'POST',
             body: JSON.stringify({
-                web_validation: qualityWebValidation ? qualityWebValidation.checked : true,
-                contradiction_check: qualityContradictionCheck ? qualityContradictionCheck.checked : true,
-                hallucination_check: qualityHallucinationCheck ? qualityHallucinationCheck.checked : true,
-                auto_web_search: qualityAutoWebSearch ? qualityAutoWebSearch.checked : true
+                web_validation: qualityWebValidation ? qualityWebValidation.checked : false,
+                contradiction_check: qualityContradictionCheck ? qualityContradictionCheck.checked : false,
+                hallucination_check: qualityHallucinationCheck ? qualityHallucinationCheck.checked : false,
+                auto_web_search: qualityAutoWebSearch ? qualityAutoWebSearch.checked : false
             })
         });
     } catch (error) {
@@ -248,6 +260,18 @@ function setupEventListeners() {
         const value = parseInt(e.target.value);
         cpuThreadsValue.textContent = value === 0 ? 'Auto' : value;
     });
+    if (primaryBudgetSlider && primaryBudgetValue) {
+        primaryBudgetSlider.addEventListener('input', (e) => {
+            const value = parseFloat(e.target.value);
+            primaryBudgetValue.textContent = value === 0 ? 'Auto' : `${value}%`;
+            // Update secondary budget display
+            const maxPercent = parseFloat(gpuMaxPercent?.textContent || '90');
+            const secondaryPercent = maxPercent - value;
+            if (gpuSecondaryBudget) {
+                gpuSecondaryBudget.textContent = secondaryPercent >= 0 ? `${secondaryPercent.toFixed(1)}%` : '0%';
+            }
+        });
+    }
     btnApplyPerformance.addEventListener('click', applyPerformanceSettings);
     
     // Audio-Einstellungen
@@ -705,6 +729,62 @@ async function loadModelServiceStatus() {
                 modelStatusImage.style.color = 'var(--text-secondary)';
             }
         }
+        
+        // Update GPU Allocation Display
+        if (status.gpu_allocation) {
+            const allocation = status.gpu_allocation;
+            
+            // Update settings panel display
+            if (gpuPrimaryBudget) {
+                gpuPrimaryBudget.textContent = allocation.primary_budget_percent !== null && allocation.primary_budget_percent !== undefined 
+                    ? `${allocation.primary_budget_percent.toFixed(1)}%` : 'Auto';
+            }
+            if (gpuSecondaryBudget) {
+                gpuSecondaryBudget.textContent = allocation.secondary_budget_percent !== null && allocation.secondary_budget_percent !== undefined 
+                    ? `${allocation.secondary_budget_percent.toFixed(1)}%` : '-';
+            }
+            
+            // Update loaded models display
+            const loadedModels = [];
+            if (allocation.primary_models && allocation.primary_models.length > 0) {
+                loadedModels.push(`Primary: ${allocation.primary_models.join(', ')}`);
+            }
+            if (allocation.secondary_models && allocation.secondary_models.length > 0) {
+                loadedModels.push(`Secondary: ${allocation.secondary_models.join(', ')}`);
+            }
+            if (gpuLoadedModels) {
+                gpuLoadedModels.textContent = loadedModels.length > 0 ? loadedModels.join(' | ') : 'Keine Modelle geladen';
+            }
+            
+            // Update sidebar display
+            if (gpuAllocationStatus) {
+                if (allocation.primary_models && allocation.primary_models.length > 0 || 
+                    allocation.secondary_models && allocation.secondary_models.length > 0) {
+                    gpuAllocationStatus.style.display = 'block';
+                    
+                    if (sidebarPrimaryBudget) {
+                        sidebarPrimaryBudget.textContent = allocation.primary_budget_percent !== null && allocation.primary_budget_percent !== undefined 
+                            ? `${allocation.primary_budget_percent.toFixed(1)}%` : 'Auto';
+                    }
+                    if (sidebarSecondaryBudget) {
+                        sidebarSecondaryBudget.textContent = allocation.secondary_budget_percent !== null && allocation.secondary_budget_percent !== undefined 
+                            ? `${allocation.secondary_budget_percent.toFixed(1)}%` : '-';
+                    }
+                    if (sidebarLoadedModels) {
+                        const sidebarModels = [];
+                        if (allocation.primary_models && allocation.primary_models.length > 0) {
+                            sidebarModels.push(allocation.primary_models.map(m => m === 'text' ? 'Text' : m === 'image' ? 'Bild' : m).join(', '));
+                        }
+                        if (allocation.secondary_models && allocation.secondary_models.length > 0) {
+                            sidebarModels.push(allocation.secondary_models.map(m => m === 'audio' ? 'Audio' : m).join(', '));
+                        }
+                        sidebarLoadedModels.textContent = sidebarModels.length > 0 ? sidebarModels.join(' | ') : '-';
+                    }
+                } else {
+                    gpuAllocationStatus.style.display = 'none';
+                }
+            }
+        }
     } catch (error) {
         console.error('Fehler beim Laden des Model-Service-Status:', error);
         // Zeige Fehler-Status
@@ -796,6 +876,7 @@ function renderConversations(conversations) {
         return `
         <div class="conversation-item ${conv.id === currentConversationId ? 'active' : ''} ${conversationType === 'image' ? 'conversation-type-image' : ''}" 
              data-id="${conv.id}">
+            <input type="checkbox" class="conversation-checkbox" data-id="${conv.id}" style="margin-right: 8px; cursor: pointer;">
             <div class="conversation-content">
                 <span class="conversation-title">${typeIcon}${escapeHtml(conv.title)}</span>
                 ${modelBadge}
@@ -809,22 +890,38 @@ function renderConversations(conversations) {
     conversationsList.scrollTop = scrollTop;
     
     
+    // Checkbox-Event-Handler für Mehrfachauswahl (vor Item-Click-Handler)
+    conversationsList.querySelectorAll('.conversation-checkbox').forEach(checkbox => {
+        checkbox.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+        checkbox.addEventListener('change', (e) => {
+            e.stopPropagation();
+            updateSelectionUI();
+        });
+    });
+    
     // Add click listeners
     conversationsList.querySelectorAll('.conversation-item').forEach(item => {
         item.addEventListener('click', (e) => {
-            if (!e.target.classList.contains('conversation-delete')) {
-                // Erlaube Wechsel auch während laufender Operationen
-                loadConversation(item.dataset.id);
+            // Ignoriere Klicks auf Checkbox und Delete-Button
+            if (e.target.classList.contains('conversation-delete') || e.target.classList.contains('conversation-checkbox') || e.target.tagName === 'INPUT') {
+                return;
             }
+            // Erlaube Wechsel auch während laufender Operationen
+            loadConversation(item.dataset.id);
         });
     });
+    
+    // Initialisiere Selection-UI
+    updateSelectionUI();
 }
 
 async function loadConversation(conversationId) {
     try {
         const conversation = await apiCall(`/conversations/${conversationId}`);
         currentConversationId = conversationId;
-        chatTitle.textContent = conversation.title;
+        updateChatTitle(conversation.title);
         
         // Clear and render messages
         chatMessages.innerHTML = '';
@@ -905,10 +1002,117 @@ async function setConversationModel(conversationId, modelId) {
     }
 }
 
+function updateChatTitle(title) {
+    chatTitle.textContent = title;
+    if (chatTitleInput) {
+        chatTitleInput.value = title;
+    }
+}
+
+function enableTitleEditing() {
+    if (!chatTitle || !chatTitleInput || !currentConversationId) return;
+    
+    chatTitle.style.display = 'none';
+    chatTitleInput.style.display = 'block';
+    chatTitleInput.focus();
+    chatTitleInput.select();
+    
+    const saveTitle = async () => {
+        const newTitle = chatTitleInput.value.trim();
+        if (newTitle && newTitle !== chatTitle.textContent) {
+            try {
+                await apiCall(`/conversations/${currentConversationId}/title`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ title: newTitle })
+                });
+                updateChatTitle(newTitle);
+                loadConversations(); // Aktualisiere Liste
+            } catch (error) {
+                console.error('Fehler beim Aktualisieren des Titels:', error);
+                chatTitleInput.value = chatTitle.textContent;
+            }
+        } else {
+            chatTitleInput.value = chatTitle.textContent;
+        }
+        chatTitle.style.display = 'block';
+        chatTitleInput.style.display = 'none';
+    };
+    
+    chatTitleInput.onblur = saveTitle;
+    chatTitleInput.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            chatTitleInput.blur();
+        } else if (e.key === 'Escape') {
+            chatTitleInput.value = chatTitle.textContent;
+            chatTitle.style.display = 'block';
+            chatTitleInput.style.display = 'none';
+        }
+    };
+}
+
+// Doppelklick auf Titel zum Editieren
+if (chatTitle) {
+    chatTitle.addEventListener('dblclick', enableTitleEditing);
+}
+
+function updateSelectionUI() {
+    const selected = getSelectedConversationIds();
+    const items = conversationsList.querySelectorAll('.conversation-item');
+    items.forEach(item => {
+        const checkbox = item.querySelector('.conversation-checkbox');
+        if (checkbox && selected.includes(checkbox.dataset.id)) {
+            item.classList.add('selected');
+        } else {
+            item.classList.remove('selected');
+        }
+    });
+}
+
+function getSelectedConversationIds() {
+    const checkboxes = conversationsList.querySelectorAll('.conversation-checkbox:checked');
+    return Array.from(checkboxes).map(cb => cb.dataset.id);
+}
+
+async function deleteSelectedConversations() {
+    const selected = getSelectedConversationIds();
+    if (selected.length === 0) return;
+    
+    if (!confirm(`Wirklich ${selected.length} Gespräch${selected.length > 1 ? 'e' : ''} löschen?`)) {
+        return;
+    }
+    
+    try {
+        await apiCall('/conversations/delete-multiple', {
+            method: 'POST',
+            body: JSON.stringify({ conversation_ids: selected })
+        });
+        
+        if (selected.includes(currentConversationId)) {
+            createNewConversation();
+        }
+        loadConversations();
+    } catch (error) {
+        console.error('Fehler beim Löschen:', error);
+        alert('Fehler beim Löschen: ' + error.message);
+    }
+}
+
+// Entf-Taste-Handler
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+        const selected = getSelectedConversationIds();
+        if (selected.length > 0 && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+            e.preventDefault();
+            deleteSelectedConversations();
+        }
+    }
+});
+
 async function createNewConversation() {
     try {
         // Setze UI sofort (optimistic update)
-        chatTitle.textContent = 'Neues Gespräch';
+        updateChatTitle('Neues Gespräch');
         chatMessages.innerHTML = '<div class="welcome-message"><h3>Neues Gespräch</h3><p>Stellen Sie eine Frage oder starten Sie ein Gespräch.</p></div>';
         
         // Zeige Chat-Interface
@@ -940,7 +1144,7 @@ async function createNewConversation() {
 async function createNewImageConversation() {
     try {
         // Setze UI sofort (optimistic update)
-        chatTitle.textContent = 'Neues Bild';
+        updateChatTitle('Neues Bild');
         chatMessages.innerHTML = '<div class="welcome-message"><h3>Neues Bild</h3><p>Beschreiben Sie das Bild, das Sie generieren möchten.</p></div>';
         
         // Zeige Image-Interface, verstecke Chat-Interface
@@ -1135,7 +1339,7 @@ async function sendMessage() {
         
         // Update title if first message
         if (chatTitle.textContent === 'Neues Gespräch') {
-            chatTitle.textContent = message.substring(0, 50) + (message.length > 50 ? '...' : '');
+            updateChatTitle(message.substring(0, 50) + (message.length > 50 ? '...' : ''));
         }
         
     } catch (error) {
@@ -1581,14 +1785,29 @@ async function applyPerformanceSettings() {
         const cpuThreads = parseInt(cpuThreadsSlider.value);
         const gpuOptimization = gpuOptimizationSelect.value;
         const disableOffload = disableCpuOffload.checked;
+        const primaryBudget = primaryBudgetSlider ? parseFloat(primaryBudgetSlider.value) : null;
+        
+        const settingsData = {
+            cpu_threads: cpuThreads === 0 ? null : cpuThreads,
+            gpu_optimization: gpuOptimization,
+            disable_cpu_offload: disableOffload
+        };
+        
+        // Add GPU allocation settings if slider exists
+        if (primaryBudgetSlider) {
+            const maxPercent = parseFloat(gpuMaxPercent?.textContent || '90');
+            if (primaryBudget > 0 && primaryBudget <= maxPercent) {
+                settingsData.primary_budget_percent = primaryBudget;
+            } else if (primaryBudget === 0) {
+                settingsData.primary_budget_percent = null; // Auto
+            } else {
+                throw new Error(`Primary Budget muss zwischen 0 und ${maxPercent}% sein`);
+            }
+        }
         
         await apiCall('/performance/settings', {
             method: 'POST',
-            body: JSON.stringify({
-                cpu_threads: cpuThreads === 0 ? null : cpuThreads,
-                gpu_optimization: gpuOptimization,
-                disable_cpu_offload: disableOffload
-            })
+            body: JSON.stringify(settingsData)
         });
         
         alert('Performance-Einstellungen wurden gespeichert. Sie werden beim nächsten Modell-Laden wirksam.');
@@ -1610,6 +1829,22 @@ async function loadPerformanceSettings() {
         }
         if (data.disable_cpu_offload !== undefined) {
             disableCpuOffload.checked = data.disable_cpu_offload;
+        }
+        // Load GPU allocation settings
+        if (data.gpu_max_percent !== undefined && gpuMaxPercent) {
+            gpuMaxPercent.textContent = data.gpu_max_percent.toFixed(0);
+            if (primaryBudgetSlider) {
+                primaryBudgetSlider.max = data.gpu_max_percent;
+            }
+        }
+        if (data.primary_budget_percent !== undefined && primaryBudgetSlider && primaryBudgetValue) {
+            if (data.primary_budget_percent === null || data.primary_budget_percent === 0) {
+                primaryBudgetSlider.value = 0;
+                primaryBudgetValue.textContent = 'Auto';
+            } else {
+                primaryBudgetSlider.value = data.primary_budget_percent;
+                primaryBudgetValue.textContent = `${data.primary_budget_percent}%`;
+            }
         }
     } catch (error) {
         console.error('Fehler beim Laden der Performance-Einstellungen:', error);
@@ -1872,12 +2107,14 @@ function formatMessageContent(text) {
      * - Unterstützt HTML-Quellen-Header (wird nicht escaped)
      */
     
+    const normalizedText = unwrapMarkdownFence(text);
+    
     // FIX: HTML-Quellen-Header extrahieren (bevor HTML escaped wird)
     const sourcesHeaders = [];
     let sourcesHeaderIndex = 0;
     // Pattern: <div style='...'><strong>Quellen:</strong> ... </div>
     const sourcesHeaderPattern = /<div[^>]*style=['"][^'"]*['"][^>]*><strong>Quellen:<\/strong>[^<]*<\/div>\s*\n*/g;
-    let processedText = text.replace(sourcesHeaderPattern, (match) => {
+    let processedText = normalizedText.replace(sourcesHeaderPattern, (match) => {
         const headerId = `sources-header-${sourcesHeaderIndex++}`;
         sourcesHeaders.push({
             id: headerId,
@@ -1922,15 +2159,15 @@ function formatMessageContent(text) {
         '<a href="$1" target="_blank" rel="noopener noreferrer" class="message-link">$1</a>'
     );
     
-    // Zeilenumbrüche in <br> umwandeln (VOR Code-Blöcken einfügen, damit Text richtig formatiert wird)
-    escaped = escaped.replace(/\n/g, '<br>');
+    // Markdown-Basis-Rendering (Überschriften, Listen, Fett/Kursiv)
+    escaped = renderMarkdownBasic(escaped);
     
     // FIX: Quellen-Header wieder einfügen (VOR Code-Blöcken, damit sie oben stehen)
     sourcesHeaders.forEach(header => {
         escaped = escaped.replace(`__SOURCES_HEADER_${header.id}__`, header.html);
     });
     
-    // Code-Blöcke wieder einfügen mit Copy-Button (NACH Zeilenumbrüche-Ersetzung)
+    // Code-Blöcke wieder einfügen mit Copy-Button (NACH Markdown-Rendering)
     codeBlocks.forEach(block => {
         const codeId = `code-content-${block.id}`;
         const copyButtonId = `copy-btn-${block.id}`;
@@ -1955,6 +2192,129 @@ function formatMessageContent(text) {
     });
     
     return escaped;
+}
+
+function unwrapMarkdownFence(text) {
+    /**
+     * Entfernt ein einzelnes äußeres Markdown-Fence, wenn es nur als
+     * Container für Markdown-Beispiele genutzt wird.
+     */
+    const trimmed = text.trim();
+    const match = trimmed.match(/^```(\w+)?\s*\n([\s\S]*?)\n```$/);
+    if (!match) {
+        return text;
+    }
+    
+    const language = (match[1] || '').toLowerCase();
+    if (language && !['markdown', 'md'].includes(language)) {
+        return text;
+    }
+    
+    const inner = match[2];
+    const markdownSignals = [
+        /^#{1,6}\s+/m,
+        /^\s*[-*]\s+/m,
+        /^\s*\d+\.\s+/m,
+        /^\s*>\s+/m,
+        /\[[^\]]+\]\([^)]+\)/m,
+        /!\[[^\]]*\]\([^)]+\)/m,
+        /^\s*\|.+\|\s*$/m
+    ];
+    
+    if (!markdownSignals.some((pattern) => pattern.test(inner))) {
+        return text;
+    }
+    
+    return inner.trim();
+}
+
+function renderMarkdownBasic(text) {
+    /**
+     * Minimaler Markdown-Renderer (sicher, ohne HTML-Interpretation).
+     * Unterstützt:
+     * - Überschriften (#..######)
+     * - Ungeordnete/Geordnete Listen
+     * - Fett/Kursiv inline
+     */
+    const lines = text.split('\n');
+    const output = [];
+    let inUl = false;
+    let inOl = false;
+    
+    const closeLists = () => {
+        if (inUl) {
+            output.push('</ul>');
+            inUl = false;
+        }
+        if (inOl) {
+            output.push('</ol>');
+            inOl = false;
+        }
+    };
+    
+    const renderInline = (line) => {
+        return line
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    };
+    
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+            closeLists();
+            output.push('<br>');
+            continue;
+        }
+        
+        if (line.startsWith('__CODE_BLOCK_') || line.startsWith('__SOURCES_HEADER_')) {
+            closeLists();
+            output.push(line);
+            continue;
+        }
+        
+        const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+        if (headingMatch) {
+            closeLists();
+            const level = headingMatch[1].length;
+            const content = renderInline(headingMatch[2]);
+            output.push(`<h${level}>${content}</h${level}>`);
+            continue;
+        }
+        
+        const ulMatch = line.match(/^[\-\*]\s+(.*)$/);
+        if (ulMatch) {
+            if (inOl) {
+                output.push('</ol>');
+                inOl = false;
+            }
+            if (!inUl) {
+                output.push('<ul>');
+                inUl = true;
+            }
+            output.push(`<li>${renderInline(ulMatch[1])}</li>`);
+            continue;
+        }
+        
+        const olMatch = line.match(/^\d+\.\s+(.*)$/);
+        if (olMatch) {
+            if (inUl) {
+                output.push('</ul>');
+                inUl = false;
+            }
+            if (!inOl) {
+                output.push('<ol>');
+                inOl = true;
+            }
+            output.push(`<li>${renderInline(olMatch[1])}</li>`);
+            continue;
+        }
+        
+        closeLists();
+            output.push(`<p>${renderInline(line)}</p>`);
+    }
+    
+    closeLists();
+    return output.join('');
 }
 
 // System Stats Update
@@ -2697,7 +3057,7 @@ async function sendMessageStream(message, conversationId, loadingId) {
                             // Update title if first message
                             if (chatTitle.textContent === 'Neues Gespräch') {
                                 const firstWords = message.substring(0, 50);
-                                chatTitle.textContent = firstWords + (message.length > 50 ? '...' : '');
+                                updateChatTitle(firstWords + (message.length > 50 ? '...' : ''));
                             }
                             return;
                         }

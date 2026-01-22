@@ -2,5 +2,8 @@
   "cpu_threads": 12,
   "gpu_optimization": "balanced",
   "disable_cpu_offload": true,
-  "max_length": 200
+  "max_length": 900,
+  "temperature": 0.9,
+  "use_quantization": true,
+  "quantization_bits": 8
 }

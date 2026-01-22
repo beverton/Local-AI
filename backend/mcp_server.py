@@ -6,6 +6,7 @@ import json
 import sys
 import logging
 import os
+import time
 from typing import Dict, Any, List, Optional
 from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
@@ -26,12 +27,18 @@ file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s'
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
 
-# Handler für stdout (für Cursor)
-stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.WARNING)  # Nur Warnings/Errors nach stdout
-stdout_formatter = logging.Formatter('%(message)s')
-stdout_handler.setFormatter(stdout_formatter)
-logger.addHandler(stdout_handler)
+# Handler für stderr (für Cursor) - stdout muss JSON-RPC bleiben
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.WARNING)  # Nur Warnings/Errors nach stderr
+stderr_formatter = logging.Formatter('%(message)s')
+stderr_handler.setFormatter(stderr_formatter)
+logger.addHandler(stderr_handler)
+
+# Stelle sicher, dass kein Logger nach stdout schreibt (stdout ist JSON-RPC only)
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+        handler.setStream(sys.stderr)
 
 # Import Model Service Client
 from model_service_client import ModelServiceClient
@@ -86,13 +93,13 @@ class MCPServer:
             },
             "write_file": {
                 "name": "write_file",
-                "description": "Schreibt eine Datei",
+                "description": "Erstellt oder überschreibt eine Datei. Verwende dieses Tool wenn der Benutzer eine Datei erstellen möchte.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "Der Pfad zur Datei"
+                            "description": "Der Pfad zur Datei (relativ zum Workspace oder absolut)"
                         },
                         "content": {
                             "type": "string",
@@ -236,11 +243,117 @@ class MCPServer:
                 }
             }
         }
+        
+        # region agent log
+        try:
+            root_logger = logging.getLogger()
+            root_handlers = []
+            for handler in root_logger.handlers:
+                root_handlers.append({
+                    "type": type(handler).__name__,
+                    "level": logging.getLevelName(handler.level),
+                    "stream": getattr(handler, "stream", None).__class__.__name__ if hasattr(handler, "stream") else None
+                })
+            logger_handlers = []
+            for handler in logger.handlers:
+                logger_handlers.append({
+                    "type": type(handler).__name__,
+                    "level": logging.getLevelName(handler.level),
+                    "stream": getattr(handler, "stream", None).__class__.__name__ if hasattr(handler, "stream") else None
+                })
+            self._debug_log({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "H6",
+                "location": "mcp_server.py:__init__",
+                "message": "logger handlers snapshot",
+                "data": {
+                    "root_handlers": root_handlers,
+                    "mcp_logger_handlers": logger_handlers
+                },
+                "timestamp": int(time.time() * 1000)
+            })
+        except Exception:
+            pass
+        # endregion
+        
+        # region agent log
+        # Intercept stdout to detect non-JSON-RPC writes (stdout must be clean)
+        try:
+            original_stdout = sys.stdout
+            
+            class StdoutInterceptor:
+                def __init__(self, wrapped, log_fn):
+                    self._wrapped = wrapped
+                    self._log_fn = log_fn
+                
+                def write(self, data):
+                    try:
+                        text = str(data)
+                        stripped = text.lstrip()
+                        is_jsonrpc = stripped.startswith("{") and "\"jsonrpc\"" in stripped
+                        is_empty = stripped == "" or stripped == "\r\n" or stripped == "\n"
+                        if not is_jsonrpc and not is_empty:
+                            self._log_fn({
+                                "sessionId": "debug-session",
+                                "runId": "pre-fix",
+                                "hypothesisId": "H7",
+                                "location": "mcp_server.py:StdoutInterceptor",
+                                "message": "stdout noise detected",
+                                "data": {
+                                    "length": len(text),
+                                    "preview": text[:120]
+                                },
+                                "timestamp": int(time.time() * 1000)
+                            })
+                    except Exception:
+                        pass
+                    return self._wrapped.write(data)
+                
+                def flush(self):
+                    return self._wrapped.flush()
+            
+            sys.stdout = StdoutInterceptor(original_stdout, self._debug_log)
+        except Exception:
+            pass
+        # endregion
+    
+    def _debug_log(self, payload: Dict[str, Any]) -> None:
+        """Schreibt Debug-Logs im NDJSON-Format (Debug Mode)."""
+        try:
+            with open(r"g:\04-CODING\Local Ai\.cursor\debug.log", "a", encoding="utf-8") as log_file_handle:
+                log_file_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
     
     def _send_response(self, response: Dict[str, Any]):
         """Sendet eine JSON-RPC Response"""
         # Verwende kompakte JSON-Serialisierung (ohne ensure_ascii=False, um Encoding-Probleme zu vermeiden)
         json_str = json.dumps(response, separators=(',', ':'))
+        # region agent log
+        try:
+            result = response.get("result", {})
+            content = result.get("content", []) if isinstance(result, dict) else []
+            text_preview = ""
+            if content and isinstance(content, list) and isinstance(content[0], dict):
+                text_preview = content[0].get("text", "")[:60]
+            self._debug_log({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "H4",
+                "location": "mcp_server.py:_send_response",
+                "message": "response gesendet",
+                "data": {
+                    "json_length": len(json_str),
+                    "has_result": isinstance(result, dict),
+                    "content_items": len(content) if isinstance(content, list) else None,
+                    "text_preview": text_preview
+                },
+                "timestamp": int(time.time() * 1000)
+            })
+        except Exception:
+            pass
+        # endregion
         # Logge Response für Debugging (nur bei tools/list) VOR dem Senden
         if isinstance(response.get("result"), dict) and "tools" in response.get("result", {}):
             tools_count = len(response["result"]["tools"])
@@ -295,9 +408,18 @@ class MCPServer:
             "id": request_id,
             "result": result
         }
-        # Logge Response für Debugging (nur bei tools/list)
+        # Logge Response für Debugging
         if isinstance(result, dict) and "tools" in result:
             logger.info(f"[MCP] Sende tools/list Response: {len(result.get('tools', []))} Tools")
+        elif isinstance(result, dict) and "content" in result:
+            # Tool-Response: Logge Struktur und isError Status
+            content_items = result.get("content", [])
+            is_error = result.get("isError", "N/A")
+            content_preview = ""
+            if content_items and isinstance(content_items[0], dict):
+                text_content = content_items[0].get("text", "")
+                content_preview = text_content[:100] + "..." if len(text_content) > 100 else text_content
+            logger.info(f"[MCP] Sende Tool-Response: content={len(content_items)} items, isError={is_error}, preview={content_preview}")
         self._send_response(response)
     
     def handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -339,6 +461,21 @@ class MCPServer:
             logger.debug(f"Konnte MCP Settings nicht laden: {e}")
             auto_silent = True
         
+        # region agent log
+        self._debug_log({
+            "sessionId": "debug-session",
+            "runId": "pre-fix",
+            "hypothesisId": "H1",
+            "location": "mcp_server.py:handle_initialize",
+            "message": "auto_model_silent_mode geladen",
+            "data": {
+                "auto_silent": auto_silent,
+                "settings_file_exists": os.path.exists(mcp_settings_file)
+            },
+            "timestamp": int(time.time() * 1000)
+        })
+        # endregion
+        
         # Erstelle Response mit serverInfo (WICHTIG für Cursor)
         # Verwende protocolVersion aus Request oder Standard
         requested_version = params.get("protocolVersion", "2024-11-05")
@@ -363,14 +500,28 @@ class MCPServer:
             }
         }
         
-        # Füge completionProvider nur hinzu, wenn Modell geladen ist
-        if model_id:
-            result["capabilities"]["completion"] = {
-                "completionProvider": {
-                    "model": "local-ai",
-                    "name": model_name
-                }
+        # Füge completionProvider immer hinzu, damit Cursor das Modell anzeigen kann
+        completion_name = model_name if model_id else "Local AI (unloaded)"
+        result["capabilities"]["completion"] = {
+            "completionProvider": {
+                "model": "local-ai",
+                "name": completion_name
             }
+        }
+        # region agent log
+        self._debug_log({
+            "sessionId": "debug-session",
+            "runId": "pre-fix",
+            "hypothesisId": "H9",
+            "location": "mcp_server.py:handle_initialize",
+            "message": "completion capability set",
+            "data": {
+                "model_id": model_id,
+                "completion_name": completion_name
+            },
+            "timestamp": int(time.time() * 1000)
+        })
+        # endregion
         
         # Logge serverInfo für Debugging
         logger.info(f"[MCP] Initialize Response: protocolVersion={protocol_version}, serverInfo={result['serverInfo']}")
@@ -413,7 +564,11 @@ class MCPServer:
             text = json.dumps(content, ensure_ascii=False, indent=2)
         else:
             text = str(content)
-        return {"content": [{"type": "text", "text": text}]}
+        # MCP-Spezifikation erfordert isError Feld in Tool-Responses
+        return {
+            "content": [{"type": "text", "text": text}],
+            "isError": False
+        }
     
     def _strip_local_prefix(self, message: str) -> tuple[str, bool]:
         """
@@ -423,17 +578,68 @@ class MCPServer:
             (cleaned_message, was_local_prefix)
         """
         if not message:
+            # region agent log
+            self._debug_log({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "H2",
+                "location": "mcp_server.py:_strip_local_prefix",
+                "message": "message leer",
+                "data": {"message": message},
+                "timestamp": int(time.time() * 1000)
+            })
+            # endregion
             return message, False
         
         message_stripped = message.strip()
         if message_stripped.lower().startswith("local:"):
             cleaned = message_stripped[6:].strip()  # Entferne "local:" (6 Zeichen)
             logger.info(f"[MCP] 'local:' Prefix erkannt - verwende lokales Modell für: {cleaned[:50]}...")
+            # region agent log
+            self._debug_log({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "H2",
+                "location": "mcp_server.py:_strip_local_prefix",
+                "message": "local: prefix erkannt",
+                "data": {
+                    "raw_prefix": message[:12],
+                    "cleaned_prefix": cleaned[:24]
+                },
+                "timestamp": int(time.time() * 1000)
+            })
+            # endregion
             return cleaned, True
         elif message_stripped.lower().startswith("chat:"):
             cleaned = message_stripped[5:].strip()  # Entferne "chat:" (5 Zeichen)
             logger.info(f"[MCP] 'chat:' Prefix erkannt - verwende lokales Modell für: {cleaned[:50]}...")
+            # region agent log
+            self._debug_log({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "H2",
+                "location": "mcp_server.py:_strip_local_prefix",
+                "message": "chat: prefix erkannt",
+                "data": {
+                    "raw_prefix": message[:12],
+                    "cleaned_prefix": cleaned[:24]
+                },
+                "timestamp": int(time.time() * 1000)
+            })
+            # endregion
             return cleaned, True
+        
+        # region agent log
+        self._debug_log({
+            "sessionId": "debug-session",
+            "runId": "pre-fix",
+            "hypothesisId": "H2",
+            "location": "mcp_server.py:_strip_local_prefix",
+            "message": "kein prefix erkannt",
+            "data": {"raw_prefix": message[:12]},
+            "timestamp": int(time.time() * 1000)
+        })
+        # endregion
         return message, False
     
     def handle_tools_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,7 +673,12 @@ class MCPServer:
                     raise ValueError("file_path ist erforderlich")
                 if content is None:
                     raise ValueError("content ist erforderlich")
+                logger.info(f"[MCP] write_file aufgerufen: file_path={file_path}, content_length={len(content) if content else 0}")
                 success = write_file(file_path, content)
+                if success:
+                    logger.info(f"[MCP] write_file erfolgreich: {file_path}")
+                else:
+                    logger.error(f"[MCP] write_file fehlgeschlagen: {file_path}")
                 message = f"Datei erfolgreich geschrieben: {file_path}" if success else "Fehler beim Schreiben"
                 return self._format_text_response(message)
             
@@ -568,6 +779,22 @@ class MCPServer:
                     raise ValueError("Message-Parameter fehlt")
                 
                 logger.info(f"[MCP] Original message: {message}")
+                # region agent log
+                self._debug_log({
+                    "sessionId": "debug-session",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H3",
+                    "location": "mcp_server.py:handle_tools_call",
+                    "message": "chat tool aufgerufen",
+                    "data": {
+                        "message_prefix": message[:20],
+                        "max_length": arguments.get("max_length"),
+                        "temperature": arguments.get("temperature"),
+                        "profile": arguments.get("profile")
+                    },
+                    "timestamp": int(time.time() * 1000)
+                })
+                # endregion
                 
                 # Entferne "local:" oder "chat:" Prefix falls vorhanden
                 message, was_local = self._strip_local_prefix(message)
@@ -595,8 +822,39 @@ class MCPServer:
                     raise RuntimeError("Model Service hat keine Antwort zurückgegeben")
                 
                 response_text = result.get("response", "")
-                logger.info(f"[MCP] Response-Text Länge: {len(response_text)} Zeichen")
-                return self._format_text_response(response_text)
+                # region agent log
+                self._debug_log({
+                    "sessionId": "debug-session",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H3",
+                    "location": "mcp_server.py:handle_tools_call",
+                    "message": "chat response erhalten",
+                    "data": {
+                        "response_length": len(response_text),
+                        "response_preview": response_text[:60]
+                    },
+                    "timestamp": int(time.time() * 1000)
+                })
+                # endregion
+                
+                # Validierung: Response-Text darf nicht leer sein
+                if not response_text or not response_text.strip():
+                    logger.error("[MCP] Model Service hat leere Response zurückgegeben")
+                    raise RuntimeError("Model Service hat leere Response zurückgegeben")
+                
+                logger.info(f"[MCP] Response-Text Länge: {len(response_text)} Zeichen, Vorschau: {response_text[:100]}...")
+                # DEBUG: Logge vollständige Response für Debugging
+                logger.info(f"[MCP] VOLLSTÄNDIGE Response-Text: {repr(response_text)}")
+                
+                # Formatiere Response mit isError Feld (via _format_text_response)
+                formatted_response = self._format_text_response(response_text)
+                logger.info(f"[MCP] Formatierte Response: content={len(formatted_response.get('content', []))} items, isError={formatted_response.get('isError', 'N/A')}")
+                # DEBUG: Logge vollständige formatierte Response
+                if formatted_response.get('content') and len(formatted_response['content']) > 0:
+                    text_content = formatted_response['content'][0].get('text', '')
+                    logger.info(f"[MCP] VOLLSTÄNDIGE formatierte Response-Text: {repr(text_content)}")
+                
+                return formatted_response
             
             else:
                 raise ValueError(f"Tool '{name}' nicht implementiert")
@@ -659,6 +917,23 @@ class MCPServer:
         method = request.get("method")
         params = request.get("params", {})
         
+        # region agent log
+        self._debug_log({
+            "sessionId": "debug-session",
+            "runId": "pre-fix",
+            "hypothesisId": "H1",
+            "location": "mcp_server.py:process_request",
+            "message": "request empfangen",
+            "data": {
+                "method": method,
+                "request_id": request_id,
+                "params_keys": list(params.keys()) if isinstance(params, dict) else None,
+                "tool_name": params.get("name") if isinstance(params, dict) else None
+            },
+            "timestamp": int(time.time() * 1000)
+        })
+        # endregion
+        
         # Prüfe ob Request gültig ist
         if method is None:
             logger.warning("[MCP] Request ohne 'method' Feld erhalten")
@@ -689,7 +964,49 @@ class MCPServer:
                     return
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
+                # region agent log
+                try:
+                    meta = params.get("_meta", {})
+                    meta_keys = list(meta.keys()) if isinstance(meta, dict) else None
+                    self._debug_log({
+                        "sessionId": "debug-session",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H5",
+                        "location": "mcp_server.py:process_request",
+                        "message": "tools/call meta",
+                        "data": {
+                            "tool_name": tool_name,
+                            "meta_keys": meta_keys,
+                            "meta_preview": str(meta)[:120] if meta else ""
+                        },
+                        "timestamp": int(time.time() * 1000)
+                    })
+                except Exception:
+                    pass
+                # endregion
                 result = self.handle_tools_call(tool_name, arguments)
+                # region agent log
+                try:
+                    content = result.get("content", []) if isinstance(result, dict) else []
+                    text_preview = ""
+                    if content and isinstance(content, list) and isinstance(content[0], dict):
+                        text_preview = content[0].get("text", "")[:60]
+                    self._debug_log({
+                        "sessionId": "debug-session",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H4",
+                        "location": "mcp_server.py:process_request",
+                        "message": "tool result erstellt",
+                        "data": {
+                            "tool_name": tool_name,
+                            "content_items": len(content) if isinstance(content, list) else None,
+                            "text_preview": text_preview
+                        },
+                        "timestamp": int(time.time() * 1000)
+                    })
+                except Exception:
+                    pass
+                # endregion
                 self._send_result(request_id, result)
             
             elif method == "chat":
@@ -752,6 +1069,23 @@ class MCPServer:
                 if not line:
                     continue
                 
+                # region agent log
+                try:
+                    self._debug_log({
+                        "sessionId": "debug-session",
+                        "runId": "pre-fix",
+                        "hypothesisId": "H8",
+                        "location": "mcp_server.py:run",
+                        "message": "stdin line received",
+                        "data": {
+                            "line_length": len(line),
+                            "line_preview": line[:120]
+                        },
+                        "timestamp": int(time.time() * 1000)
+                    })
+                except Exception:
+                    pass
+                # endregion
                 logger.info(f"[MCP] Request erhalten: {line[:200]}...")
                 try:
                     request = json.loads(line)
@@ -759,6 +1093,23 @@ class MCPServer:
                     self.process_request(request)
                 except json.JSONDecodeError as e:
                     logger.error(f"[MCP] Invalid JSON: {line[:100]}...")
+                    # region agent log
+                    try:
+                        self._debug_log({
+                            "sessionId": "debug-session",
+                            "runId": "pre-fix",
+                            "hypothesisId": "H8",
+                            "location": "mcp_server.py:run",
+                            "message": "stdin json decode error",
+                            "data": {
+                                "error": str(e),
+                                "line_preview": line[:120]
+                            },
+                            "timestamp": int(time.time() * 1000)
+                        })
+                    except Exception:
+                        pass
+                    # endregion
                     self._send_error(None, -32700, f"Parse error: {str(e)}")
                 except Exception as e:
                     logger.error(f"[MCP] Error processing request: {e}", exc_info=True)

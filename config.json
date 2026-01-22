@@ -12,9 +12,9 @@
       "type": "qwen2",
       "description": "⭐ EMPFOHLEN: Bestes Tool-Use & Web-Search - optimiert für präzise Antworten",
       "loading": {
-        "device_map": "cuda",
+        "device_map": "auto",
         "torch_dtype": "float16",
-        "disable_cpu_offload": true
+        "disable_cpu_offload": false
       }
     },
     "phi-3-mini-4k": {

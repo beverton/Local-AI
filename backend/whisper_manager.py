@@ -24,7 +24,14 @@ class WhisperManager:
         self.model = None
         self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.gpu_allocation_budget_gb: Optional[float] = None  # GPU budget in GB for this model
         logger.info(f"Whisper Manager - Verwende Device: {self.device}")
+    
+    def set_gpu_allocation_budget(self, budget_gb: Optional[float]):
+        """Setzt das GPU-Allokations-Budget für dieses Modell (in GB)"""
+        self.gpu_allocation_budget_gb = budget_gb
+        if budget_gb is not None:
+            logger.info(f"GPU-Allokations-Budget für Whisper-Modell gesetzt: {budget_gb:.2f}GB")
     
     def _load_config(self) -> Dict[str, Any]:
         """Lädt die Konfiguration aus config.json"""
@@ -95,14 +102,27 @@ class WhisperManager:
             )
             
             dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+            
+            # GPU-Budget-Unterstützung: Verwende device_map="auto" mit max_memory wenn Budget gesetzt
+            model_kwargs = {
+                "dtype": dtype,
+                "local_files_only": True
+            }
+            
+            if self.device == "cuda" and self.gpu_allocation_budget_gb is not None and self.gpu_allocation_budget_gb > 0:
+                # GPU-Budget ist gesetzt - verwende device_map="auto" mit max_memory
+                model_kwargs["device_map"] = "auto"
+                model_kwargs["max_memory"] = {0: f"{self.gpu_allocation_budget_gb:.2f}GB"}
+                logger.info(f"GPU-Allokations-Budget aktiv für Whisper: max_memory={self.gpu_allocation_budget_gb:.2f}GB")
+            
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 model_path,
-                dtype=dtype,  # Verwende dtype statt torch_dtype (Deprecation-Warnung behoben)
-                local_files_only=True
+                **model_kwargs
             )
             
-            # Auf Device verschieben
-            self.model = self.model.to(self.device)
+            # Auf Device verschieben nur wenn device_map nicht verwendet wurde
+            if "device_map" not in model_kwargs:
+                self.model = self.model.to(self.device)
             
             ## GPU-Optimierungen
             if self.device == "cuda":
@@ -132,7 +152,10 @@ class WhisperManager:
             return True
             
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
             logger.error(f"Fehler beim Laden des Whisper-Modells: {e}")
+            logger.error(f"Traceback: {error_details}")
             self.model = None
             self.processor = None
             return False

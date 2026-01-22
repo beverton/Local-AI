@@ -12,7 +12,7 @@
         "is_coding": false
       },
       "system_prompt_modifications": {
-        "qwen": "Du bist ein hilfreicher Assistent. Antworte kurz und präzise. Für einfache Fragen (z.B. Rechenaufgaben) gib direkt die Antwort ohne lange Erklärungen. WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."
+        "qwen": "Du bist ein hilfreicher Assistent. WICHTIG: Antworte EXTREM KURZ - nur die direkte Antwort, keine Erklärungen, keine zusätzlichen Fragen, keine Beispiele. Für Rechenaufgaben: Nur die Zahl. Für Fragen: Nur die Antwort in 1-2 Sätzen. STOPPE sofort nach der Antwort - generiere KEINE weiteren Tokens."
       }
     },
     "coding": {
