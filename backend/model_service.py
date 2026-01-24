@@ -16,11 +16,13 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 from logging_utils import get_logger
 from contextlib import asynccontextmanager
+from agent_tools import initialize_tools, read_file, write_file, list_directory, delete_file, file_exists, web_search
+from tool_agent_loop import ToolAgentLoop, ToolAgentConfig
 
 # Setup logging - verwende StructuredLogger
 logger = get_logger(__name__, log_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "model_service.log"))
@@ -59,12 +61,22 @@ app.add_middleware(
 # Get config path
 config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 
+# Workspace root for tools
+workspace_root = os.path.join(os.path.dirname(os.path.dirname(__file__)))
+
 # Load config for temp directory
 try:
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 except:
     config = {}
+
+# Initialize tools for Model Service (needed for Tool-Agent-Loop in streaming)
+try:
+    # model_manager is created later; initialize_tools requires an instance. We re-init after model_manager is ready.
+    pass
+except Exception:
+    pass
 
 # Performance Settings Path
 PERFORMANCE_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "performance_settings.json")
@@ -273,6 +285,14 @@ if ImageManager:
 else:
     
     logger.warning("ImageManager-Klasse nicht verfügbar (Import fehlgeschlagen)")
+
+
+# Tools init for this process (needed for ToolAgentLoop)
+try:
+    # image_manager may be None; initialize_tools handles it
+    initialize_tools(model_manager, image_manager, None, workspace_root)
+except Exception as e:
+    logger.warning(f"Tools konnten nicht initialisiert werden (Model-Service): {e}")
 
 
 # Client tracking: {model_type: {model_id: [{client_id, app_name, timestamp, last_used}]}}
@@ -558,6 +578,8 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None  # Wenn None, wird Profil-Parameter verwendet
     language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en")
     profile: Optional[str] = None  # Verhaltensprofil: "default", "coding", "creative" (wenn None, wird default verwendet)
+    # Streaming: Standard True (SSE). Für alte Clients: stream=False senden.
+    stream: Optional[bool] = True
 
 
 class TranscribeRequest(BaseModel):
@@ -1485,54 +1507,64 @@ async def chat(request: ChatRequest, http_request: Request):
             messages = [{"role": "user", "content": request.message}]
         logger.info(f"[CHAT] Verarbeite {len(messages)} Messages")
         
-        # WICHTIG: Profile sind vorübergehend deaktiviert - werden zentral im Model Service verwaltet
-        # Profile-Logik bleibt auskommentiert für zukünftige Verwendung (Persönlichkeiten, etc.)
-        # if request.profile is None:
-        #     profile_name = "default"
-        #     logger.info(f"[CHAT] Kein Profil angegeben, verwende 'default'")
-        # else:
-        #     profile_name = get_profile_for_model(model_id, request.profile)
-        #     logger.info(f"[CHAT] Profil angegeben: '{request.profile}' -> verwendet: '{profile_name}'")
-        # profile_params = get_profile_parameters(profile_name)
-        # logger.info(f"[CHAT] Profil-Parameter geladen: {profile_params}")
-        
-        # Parameter-Logik: Request > Persistent Setting > Default
-        # WICHTIG: Profile werden nicht mehr verwendet - alle Parameter kommen aus Settings
+        # Parameter-Logik:
+        # - Wenn Profil gesetzt: Request > Profil > Persistent Settings > Default
+        # - Sonst: Request > Persistent Settings > Default
         perf_settings = _load_performance_settings()
+        profile_name: Optional[str] = None
+        profile_params: Dict[str, Any] = {}
+        if request.profile:
+            profile_name = get_profile_for_model(model_id, request.profile)
+            logger.info(f"[CHAT] Profil angegeben: '{request.profile}' -> verwendet: '{profile_name}'")
+            profile_params = get_profile_parameters(profile_name)
+        else:
+            logger.info("[CHAT] Kein Profil angegeben, verwende Performance Settings")
         
         # temperature: Request > Persistent Setting > Default (0.6)
         if request.temperature is not None:
             effective_temperature = request.temperature
             logger.info(f"[CHAT] temperature aus Request: {effective_temperature}")
         else:
-            effective_temperature = perf_settings.get("temperature", 0.6)
-            logger.info(f"[CHAT] temperature aus Performance Settings: {effective_temperature}")
+            if profile_params:
+                effective_temperature = profile_params.get("temperature", perf_settings.get("temperature", 0.6))
+                logger.info(f"[CHAT] temperature aus Profil/Settings: {effective_temperature}")
+            else:
+                effective_temperature = perf_settings.get("temperature", 0.6)
+                logger.info(f"[CHAT] temperature aus Performance Settings: {effective_temperature}")
         
         # max_length: Request > Persistent Setting > Default (512)
         if request.max_length is not None:
             effective_max_length = request.max_length
             logger.info(f"[CHAT] max_length aus Request: {effective_max_length}")
         else:
-            effective_max_length = perf_settings.get("max_length", 512)
-            logger.info(f"[CHAT] max_length aus Performance Settings: {effective_max_length}")
+            if profile_params:
+                effective_max_length = profile_params.get("max_length", perf_settings.get("max_length", 512))
+                logger.info(f"[CHAT] max_length aus Profil/Settings: {effective_max_length}")
+            else:
+                effective_max_length = perf_settings.get("max_length", 512)
+                logger.info(f"[CHAT] max_length aus Performance Settings: {effective_max_length}")
         
-        # is_coding wird nicht mehr aus Profilen verwendet (vorübergehend deaktiviert)
-        is_coding = False
+        # is_coding: aus Profil (wenn vorhanden), sonst False
+        is_coding = bool(profile_params.get("is_coding", False)) if profile_params else False
         
         logger.info(f"[CHAT] Finale Parameter: temperature={effective_temperature}, max_length={effective_max_length}, is_coding={is_coding}")
         
+        # Bestimme Antwort-Sprache (immer, auch wenn messages bereits system enthalten)
+        response_language = request.language or "de"  # Default: Deutsch
+
         # Stelle sicher, dass System-Prompt vorhanden ist (wenn nicht bereits in messages)
         has_system = any(m.get("role") == "system" for m in messages)
         if not has_system:
-            # Bestimme Antwort-Sprache
-            response_language = request.language or "de"  # Default: Deutsch
             
-            # WICHTIG: Profile sind deaktiviert - verwende Standard-System-Prompt
-            # profile_system_prompt = get_profile_system_prompt(model_id, profile_name, response_language)
-            # if profile_system_prompt:
-            #     system_prompt = profile_system_prompt
-            # elif "mistral" in model_id.lower():
-            if "mistral" in model_id.lower():
+            # Profil-System-Prompt (optional)
+            if profile_name:
+                profile_system_prompt = get_profile_system_prompt(model_id, profile_name, response_language)
+            else:
+                profile_system_prompt = None
+
+            if profile_system_prompt:
+                system_prompt = profile_system_prompt
+            elif "mistral" in model_id.lower():
                 if response_language == "en":
                     system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words. Answer ONLY the asked question, no additional explanations or technical details."
                 else:  # Deutsch (de) oder andere
@@ -1552,19 +1584,20 @@ async def chat(request: ChatRequest, http_request: Request):
                     if web_search_enabled:
                         tools_list += "\n- web_search(query): Performs a web search."
                     
-                    system_prompt = f"""You are a helpful AI assistant who can both answer questions and write code.
+                    system_prompt = f"""You are a helpful AI assistant similar to Perplexity AI.
 
 {tools_list}
 
-IMPORTANT: If the user wants to create a file, use the write_file tool.
+CRITICAL - Use tool results/sources:
+- If tool results (web/file) are provided, use ONLY those facts (your internal knowledge may be outdated)
+- If sources/URLs are present, cite them as [1], [2], ... and do NOT invent additional sources
+- Copy URLs exactly as shown
 {"IMPORTANT: Do NOT generate URLs or links. Web search is disabled." if not web_search_enabled else ""}
 
-- For questions: Answer clearly and directly
-- For code requests: Use Markdown code blocks with language tags (```python, ```javascript, etc.)
-- Only use code blocks when code is requested
-- Include helpful comments in code when appropriate
-- Explain code briefly if needed
-IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."""
+For answers:
+- Be precise and direct (no repetition of system/user text)
+- For code: use Markdown code blocks with language tags, keep code complete and runnable
+"""
                 else:  # Deutsch (de) oder andere
                     tools_list = """VERFÜGBARE TOOLS (werden automatisch genutzt wenn du sie anfragst):
 - read_file(file_path): Liest eine Datei. Formuliere: "Lies die Datei X", "Prüfe die Datei Y", "Schaue in die Datei Z", "Nachschauen in X", "Analysiere Y"
@@ -1576,20 +1609,26 @@ IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or us
                     
                     web_search_warning = "\n\nWICHTIG: Generiere KEINE URLs oder Links. Web-Suche ist deaktiviert." if not web_search_enabled else ""
                     
-                    system_prompt = f"""Du bist ein hilfreicher AI-Assistent, der sowohl Fragen beantworten als auch Code schreiben kann.
+                    system_prompt = f"""Du bist ein hilfreicher AI-Assistent ähnlich Perplexity AI.
 
 {tools_list}
 
-WICHTIG: Wenn du eine Datei lesen, einen Ordner durchsuchen oder Code analysieren musst, 
-formuliere deine Anfrage klar mit "Lies", "Prüfe", "Schaue in", "Nachschauen in", "Analysiere", "Zeige mir", etc.
-Die Tools werden automatisch erkannt und ausgeführt. Du kannst auch sagen: "Kannst du in der Datei X nachschauen?" oder "Prüfe die Datei Y".{web_search_warning}
+KRITISCH - Tool-Ergebnisse/Quellen nutzen:
+- Wenn Tool-Ergebnisse (Web-Suche, Dateien) gezeigt werden: nutze AUSSCHLIESSLICH diese Informationen (dein Wissen ist veraltet)
+- Wenn Quellen/URLs vorhanden sind: referenziere sie als [1], [2], ... und erfinde keine zusätzlichen Quellen
+- Kopiere URLs EXAKT wie gezeigt (keine Leerzeichen/Änderungen)
+{web_search_warning}
 
-- Bei Fragen: Antworte klar und direkt
-- Bei Code-Anfragen: Verwende Markdown Code-Blocks mit Sprach-Tags (```python, ```javascript, etc.)
-- Verwende Code-Blocks nur wenn Code gefragt ist
-- Füge hilfreiche Kommentare in Code hinzu wenn angemessen
-- Erkläre Code kurz wenn nötig
-WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt oder User-Nachrichten."""
+Für Antworten:
+- Antworte präzise und direkt (keine Wiederholung von System/User-Text)
+- Für Code: verwende Markdown Code-Blöcke mit Sprach-Tag, vollständig und ausführbar
+
+QUALITÄT & SPRACHE (wichtig):
+- Antworte NUR auf Deutsch.
+- Verwende korrekte Rechtschreibung, konsistente Nummerierung und saubere Absätze.
+- Keine gemischten Alphabete/Schriften (z.B. kyrillische Buchstaben in deutschen Wörtern).
+- Für Rezepte/Anleitungen: Zutatenliste + Schritte 1..N mit realistischen Mengen; keine unnötigen Zutaten (z.B. Öl/Essig), außer ausdrücklich gewünscht.
+"""
             else:
                 if response_language == "en":
                     system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English. IMPORTANT: Answer ONLY with your response, do NOT repeat the system prompt or user messages."
@@ -1598,6 +1637,38 @@ WICHTIG: Antworte NUR mit deiner Antwort, wiederhole NICHT den System-Prompt ode
             
             # Füge System-Prompt am Anfang hinzu
             messages.insert(0, {"role": "system", "content": system_prompt})
+
+        # Streaming-Branch (SSE) – Standard: aktiv, aber Clients können stream=False senden
+        use_streaming = True if request.stream is None else bool(request.stream)
+        if use_streaming:
+            def generate():
+                try:
+                    quality_settings = _load_quality_settings()
+                    enable_web = bool(quality_settings.get("auto_web_search", False))
+
+                    loop = ToolAgentLoop(model_manager, enable_web_search=enable_web)
+                    cfg = ToolAgentConfig(
+                        max_tool_calls=3,
+                        decide_max_tokens=256,
+                        final_max_tokens=int(effective_max_length),
+                        decide_temperature=0.0,
+                        final_temperature=float(effective_temperature),
+                    )
+
+                    # Streaming Tool-Agent-Loop (pauses while tools run by design)
+                    for evt in loop.run_sse(
+                        messages=messages,
+                        user_message=request.message,
+                        conversation_id=request.conversation_id,
+                        model_id=model_id,
+                        language=response_language,
+                        cfg=cfg,
+                    ):
+                        yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.error(f"Fehler bei Streaming: {e}")
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return StreamingResponse(generate(), media_type='text/event-stream')
         
         # FIX: Synchroner generate() Call muss in Thread-Pool laufen um Event Loop nicht zu blockieren
         import asyncio

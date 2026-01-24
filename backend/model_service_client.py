@@ -207,12 +207,14 @@ class ModelServiceClient:
             logger.error(f"Fehler beim Abrufen des Image-Modell-Status: {e}")
             return None
     
-    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: Optional[int] = None, temperature: Optional[float] = None, language: Optional[str] = None, profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def chat(self, message: str, messages: Optional[List[Dict[str, str]]] = None, conversation_id: Optional[str] = None, max_length: Optional[int] = None, temperature: Optional[float] = None, language: Optional[str] = None, profile: Optional[str] = None, stream: Optional[bool] = False) -> Optional[Dict[str, Any]]:
         """Sendet Chat-Request an Model-Service"""
         try:
             payload = {
                 "message": message,
-                "conversation_id": conversation_id
+                "conversation_id": conversation_id,
+                # Wichtig: /chat streamt standardmäßig (SSE). Für JSON-Antworten stream=False senden.
+                "stream": stream
             }
             # Nur Parameter hinzufügen, wenn sie gesetzt sind (None = Model Service verwendet Settings/Profil)
             if max_length is not None:
@@ -240,6 +242,124 @@ class ModelServiceClient:
         except Exception as e:
             logger.error(f"Fehler bei Chat-Request: {e}")
             return None
+
+    def chat_stream(
+        self,
+        message: str,
+        messages: Optional[List[Dict[str, str]]] = None,
+        conversation_id: Optional[str] = None,
+        max_length: Optional[int] = None,
+        temperature: Optional[float] = None,
+        language: Optional[str] = None,
+        profile: Optional[str] = None,
+    ):
+        """
+        Streamt Chat-Response vom Model Service (SSE) und yieldet Text-Chunks.
+
+        Yields:
+            str chunks (backwards compatible)
+        """
+        payload: Dict[str, Any] = {
+            "message": message,
+            "conversation_id": conversation_id,
+            "stream": True,
+        }
+        if max_length is not None:
+            payload["max_length"] = max_length
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if messages:
+            payload["messages"] = messages
+        if language:
+            payload["language"] = language
+        if profile:
+            payload["profile"] = profile
+
+        try:
+            with requests.post(
+                f"{self.base_url}/chat",
+                json=payload,
+                headers=self._get_headers(),
+                stream=True,
+                timeout=300,
+            ) as r:
+                if r.status_code != 200:
+                    raise RuntimeError(f"Model-Service Streaming Fehler: {r.status_code} - {r.text}")
+
+                # Parse SSE lines: "data: {...}"
+                for line in r.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    try:
+                        evt = json.loads(data_str)
+                    except Exception:
+                        continue
+
+                    if isinstance(evt, dict) and evt.get("error"):
+                        raise RuntimeError(str(evt.get("error")))
+
+                    if isinstance(evt, dict) and evt.get("done"):
+                        return
+
+                    chunk = evt.get("chunk") if isinstance(evt, dict) else None
+                    if chunk:
+                        yield chunk
+        except Exception as e:
+            logger.error(f"Fehler bei Chat-Streaming: {e}")
+            raise
+
+    def chat_stream_events(
+        self,
+        message: str,
+        messages: Optional[List[Dict[str, str]]] = None,
+        conversation_id: Optional[str] = None,
+        max_length: Optional[int] = None,
+        temperature: Optional[float] = None,
+        language: Optional[str] = None,
+        profile: Optional[str] = None,
+    ):
+        """
+        Streamt Chat-Response vom Model Service (SSE) und yieldet rohe Event-Dicts.
+        """
+        payload: Dict[str, Any] = {
+            "message": message,
+            "conversation_id": conversation_id,
+            "stream": True,
+        }
+        if max_length is not None:
+            payload["max_length"] = max_length
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if messages:
+            payload["messages"] = messages
+        if language:
+            payload["language"] = language
+        if profile:
+            payload["profile"] = profile
+
+        with requests.post(
+            f"{self.base_url}/chat",
+            json=payload,
+            headers=self._get_headers(),
+            stream=True,
+            timeout=300,
+        ) as r:
+            if r.status_code != 200:
+                raise RuntimeError(f"Model-Service Streaming Fehler: {r.status_code} - {r.text}")
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                try:
+                    evt = json.loads(data_str)
+                except Exception:
+                    continue
+                if isinstance(evt, dict) and evt.get("error"):
+                    raise RuntimeError(str(evt.get("error")))
+                yield evt
     
     def transcribe(self, audio_base64: str, language: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Sendet Transkriptions-Request an Model-Service"""

@@ -16,7 +16,7 @@ _perf_settings_cache: Optional[Dict[str, Any]] = None
 _perf_settings_cache_timestamp: float = 0
 _perf_settings_cache_lock = threading.Lock()
 _perf_settings_file_path: Optional[str] = None
-_cache_ttl: float = 5.0  # Cache-TTL in Sekunden (5s für schnelle Updates)
+_cache_ttl: float = 60.0  # Cache-TTL in Sekunden (60s für bessere Performance - Settings ändern sich selten)
 
 # Default Settings
 DEFAULT_PERFORMANCE_SETTINGS = {
@@ -77,6 +77,14 @@ def load_performance_settings(force_reload: bool = False) -> Dict[str, Any]:
         # Prüfe ob Cache gültig ist
         if not force_reload and _perf_settings_cache is not None:
             if current_time - _perf_settings_cache_timestamp < _cache_ttl:
+                # #region agent log
+                try:
+                    import json as json_module
+                    import time as time_module
+                    with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                        f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B1","location":"settings_loader.py:75","message":"Cache hit","data":{"cache_age":current_time-_perf_settings_cache_timestamp},"timestamp":int(time_module.time()*1000)})+"\n")
+                except: pass
+                # #endregion
                 return _perf_settings_cache.copy()
         
         # Finde Settings-Datei wenn noch nicht gefunden
@@ -104,6 +112,14 @@ def load_performance_settings(force_reload: bool = False) -> Dict[str, Any]:
         # Update Cache
         _perf_settings_cache = settings.copy()
         _perf_settings_cache_timestamp = current_time
+        # #region agent log
+        try:
+            import json as json_module
+            import time as time_module
+            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json_module.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"B1","location":"settings_loader.py:105","message":"Cache miss - loaded from file","data":{"file_path":_perf_settings_file_path},"timestamp":int(time_module.time()*1000)})+"\n")
+        except: pass
+        # #endregion
         
         return settings
 

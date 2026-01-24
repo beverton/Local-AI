@@ -7,6 +7,7 @@ import os
 import logging
 import subprocess
 import time
+import re
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,8 @@ from model_manager import ModelManager
 from conversation_manager import ConversationManager
 from preference_learner import PreferenceLearner
 from quality_manager import QualityManager
+from generation_trace import default_trace_buffer
+from tool_agent_loop import ToolAgentLoop, ToolAgentConfig
 
 # Logger muss vor dem try-except verfügbar sein
 from logging_utils import get_logger
@@ -196,6 +199,9 @@ preference_learner = PreferenceLearner()
 # Initialisiere Quality Manager mit Web-Search (global) - für ALLE Chat-Modelle
 quality_manager = QualityManager(web_search_function=web_search)
 
+# Generation Trace Buffer (Debug/Diagnostics)
+generation_traces = default_trace_buffer(workspace_root)
+
 # ImageManager initialisieren (mit Fehlerbehandlung)
 
 image_manager = None
@@ -336,6 +342,7 @@ class ChatRequest(BaseModel):
     max_length: int = 2048
     temperature: float = 0.3  # Default: 0.3 für bessere Qualität (konsistent mit Frontend)
     language: Optional[str] = None  # Sprache für Antwort (z.B. "de", "en") - wenn None, wird aus speech_input_app/config.json gelesen
+    profile: Optional[str] = None  # optional: default/coding/creative (wird an Model Service weitergereicht)
 
 
 class SetConversationModelRequest(BaseModel):
@@ -757,6 +764,22 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             logger.warning(f"Fehler beim Lesen der Sprach-Konfiguration: {e}, verwende Deutsch")
             stream_response_language = "de"
+
+    # Heuristik: Wenn User-Nachricht klar deutsch ist, erzwinge Deutsch (auch wenn Speech-Config auf "en" steht).
+    # Hintergrund: Text-Chat kommt oft ohne request.language; Speech-Config ist dafür kein guter Default.
+    if not request.language:
+        try:
+            msg_l = (request.message or "").lower()
+            looks_german = bool(re.search(r"[äöüß]", msg_l)) or bool(
+                re.search(r"\b(wie|was|warum|bitte|danke|gib|rezept|zutaten|schritte|anleitung|und|für|mit)\b", msg_l)
+            )
+            looks_english = bool(re.search(r"\b(what|why|please|thanks|recipe|ingredients|steps|how to|with)\b", msg_l))
+            if looks_german and not looks_english:
+                stream_response_language = "de"
+            elif looks_english and not looks_german:
+                stream_response_language = "en"
+        except Exception:
+            pass
     
     # Erstelle Messages-Liste
     messages = []
@@ -770,6 +793,19 @@ async def chat_stream(request: ChatRequest):
             system_prompt = "You are a helpful AI assistant. Answer briefly, precisely and directly in English. Keep answers under 200 words."
         else:
             system_prompt = "Du bist ein hilfreicher AI-Assistent. Antworte kurz, präzise und direkt auf Deutsch. Halte Antworten unter 200 Wörtern."
+    elif current_model and "qwen" in current_model.lower():
+        if stream_response_language == "en":
+            system_prompt = (
+                "You are a helpful assistant. Answer ONLY in English. "
+                "Write clean, well-formatted text with correct spacing and paragraphs. "
+                "For instructions/recipes: use a clear ingredients list and numbered steps."
+            )
+        else:
+            system_prompt = (
+                "Du bist ein hilfreicher Assistent. Antworte NUR auf Deutsch. "
+                "Schreibe sauber formatiert (Absätze, korrekte Leerzeichen) und ohne gemischte Alphabete/Schriften. "
+                "Für Anleitungen/Rezept: nutze eine Zutatenliste und nummerierte Schritte (1..N) mit realistischen Mengen."
+            )
     else:
         if stream_response_language == "en":
             system_prompt = "You are a helpful, precise and friendly AI assistant. Answer clearly and directly in English."
@@ -829,139 +865,264 @@ async def chat_stream(request: ChatRequest):
     # Speichere User-Nachricht
     conversation_manager.add_message(conversation_id, "user", request.message)
     
-    # 🔥 CHATANGENT INTEGRATION - Nutze ChatAgent für Tool-Support (Web-Search etc.)
-    use_chat_agent = True  # Flag um ChatAgent zu aktivieren
+    # OPTIMIERT: Verwende direktes Streaming für bessere Performance
+    # ChatAgent blockiert zu lange - echtes Streaming ist viel schneller
+    effective_temperature = request.temperature if request.temperature > 0 else 0.3
     
     # Streaming-Generator
     async def generate():
         try:
-            # 🔥 CHATANGENT INTEGRATION - Versuche ChatAgent zu nutzen
-            if use_chat_agent:
-                try:
-                    # Erstelle oder hole ChatAgent für diese Conversation
-                    conversation_agents = agent_manager.get_conversation_agents(conversation_id)
-                    chat_agent = None
-                    
-                    # Suche nach existierendem ChatAgent
-                    for agent_info in conversation_agents:
-                        if agent_info.get("type") == "chat_agent":
-                            chat_agent = agent_manager.get_agent(conversation_id, agent_info["id"])
-                            break
-                    
-                    # Erstelle neuen ChatAgent falls nicht vorhanden
-                    if not chat_agent:
-                        agent_id = agent_manager.create_agent(
-                            conversation_id=conversation_id,
-                            agent_type="chat_agent",
-                            model_id=model_to_use,
-                            set_managers_func=set_agent_managers
-                        )
-                        chat_agent = agent_manager.get_agent(conversation_id, agent_id)
-                    
-                    # Setze ChatAgent-Parameter für konsistente Token-Budgets
-                    effective_temperature = request.temperature if request.temperature > 0 else 0.3
-                    chat_agent.config["max_length"] = request.max_length
-                    chat_agent.config["temperature"] = effective_temperature
-                    
-                    # Nutze ChatAgent für Antwort-Generierung (mit Tools/Web-Search)
-                    response = chat_agent.process_message(request.message)
-                    
-                    # 🔧 FIX: Simuliere Streaming durch Chunks im richtigen Format
-                    # Frontend erwartet {'chunk': '...'}, nicht {'type': 'content', 'content': '...'}
-                    chunk_size = 15  # Zeichen pro Chunk
-                    for i in range(0, len(response), chunk_size):
-                        chunk = response[i:i+chunk_size]
-                        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                    
-                    # Fertig - Frontend prüft auf {'done': True}
-                    yield f"data: {json.dumps({'done': True})}\n\n"
-                    
-                    # Speichere Assistant-Nachricht
-                    conversation_manager.add_message(conversation_id, "assistant", response)
-                    
-                    # Erfolg - return ohne Fallback
-                    return
-                    
-                except Exception as e:
-                    logger.warning(f"ChatAgent fehlgeschlagen, fallback auf normales Streaming: {e}")
-                    # Fallback auf normalen Streaming-Modus unten
-            
-            effective_temperature = request.temperature if request.temperature > 0 else 0.3
-            
             full_response = ""
+            replaced_response = None
+
+            trace = generation_traces.start(
+                route="/chat/stream",
+                conversation_id=conversation_id,
+                model_id=model_to_use,
+                use_model_service=USE_MODEL_SERVICE,
+                language=stream_response_language,
+                max_length=request.max_length,
+                temperature=effective_temperature,
+                message=request.message,
+            )
+
+            # Meta event (frontend can ignore safely)
+            yield f"data: {json.dumps({'meta': {'trace_id': trace.trace_id, 'conversation_id': conversation_id, 'model_id': model_to_use, 'language': stream_response_language}})}\n\n"
             
-            if USE_MODEL_SERVICE:
-                # Model-Service unterstützt noch kein echtes Streaming
-                # Verwende lokales Streaming als Fallback, wenn Modell lokal verfügbar ist
+            # #region agent log
+            import time as time_module
+            stream_start_time = time_module.time()
+            try:
+                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C2","location":"main.py:836","message":"Streaming generator started","data":{"message_length":len(request.message),"use_model_service":USE_MODEL_SERVICE},"timestamp":int(time_module.time()*1000)})+"\n")
+            except: pass
+            # #endregion
+            
+            # Fast-Path: bekannte Fallback-Antworten (spart Zeit + verhindert Nonsense)
+            fallback = None
+            try:
+                fallback = quality_manager.get_fallback_answer(request.message, language=stream_response_language or "de")
+            except Exception:
+                fallback = None
+            if fallback:
+                full_response = fallback
+                # in kleine Chunks streamen, damit UI gleich reagiert
+                chunk_size = 120
+                for i in range(0, len(full_response), chunk_size):
+                    chunk_piece = full_response[i:i+chunk_size]
+                    trace.add_chunk(chunk_piece)
+                    yield f"data: {json.dumps({'chunk': chunk_piece})}\n\n"
+                    await asyncio.sleep(0)
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                conversation_manager.add_message(conversation_id, "assistant", full_response)
+                trace.finish(full_response=full_response)
+                generation_traces.persist(trace)
+                return
+
+            # OPTIMIERT: Verwende immer echtes Streaming wenn Modell lokal geladen ist
+            if model_manager.is_model_loaded():
+                # Lokal: gleicher Tool-Agent-Loop wie Model-Service
+                quality_settings = quality_manager.get_settings()
+                enable_web = bool(quality_settings.get("auto_web_search", False))
+                loop = ToolAgentLoop(model_manager, enable_web_search=enable_web)
+                cfg = ToolAgentConfig(
+                    max_tool_calls=3,
+                    decide_max_tokens=256,
+                    final_max_tokens=int(request.max_length or 2048),
+                    decide_temperature=0.0,
+                    final_temperature=float(effective_temperature),
+                )
+                for evt in loop.run_sse(
+                    messages=messages,
+                    user_message=request.message,
+                    conversation_id=conversation_id,
+                    model_id=model_to_use,
+                    language=stream_response_language or "de",
+                    cfg=cfg,
+                    emit_meta=False,  # main already emits meta
+                ):
+                    if isinstance(evt, dict):
+                        if isinstance(evt.get("chunk"), str):
+                            full_response += evt["chunk"]
+                            trace.add_chunk(evt["chunk"])
+                        if isinstance(evt.get("tool_call"), dict):
+                            tc = evt["tool_call"]
+                            trace.add_tool_call(
+                                name=str(tc.get("name") or ""),
+                                arguments=tc.get("arguments"),
+                                call_id=tc.get("call_id"),
+                            )
+                        if isinstance(evt.get("tool_result"), dict):
+                            tr = evt["tool_result"]
+                            trace.add_tool_result(
+                                name=str(tr.get("name") or ""),
+                                ok=bool(tr.get("ok", False)),
+                                call_id=tr.get("call_id"),
+                                preview=tr.get("result_preview"),
+                                error=tr.get("error"),
+                            )
+                        if evt.get("replace") and isinstance(evt.get("content"), str):
+                            full_response = evt["content"]
+                        # only forward non-meta events (we already sent meta)
+                        yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                        await asyncio.sleep(0)
+            elif USE_MODEL_SERVICE:
+                # Model-Service: echtes Streaming per SSE proxyen
                 try:
-                    # Versuche lokales Streaming zu verwenden, wenn Modell lokal geladen ist
-                    if model_manager.is_model_loaded():
-                        # Lokales Streaming verwenden
-                        for chunk in model_manager.generate_stream(
-                            messages,
-                            max_length=request.max_length,
-                            temperature=effective_temperature
-                        ):
-                            full_response += chunk
-                            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                    else:
-                        # Fallback: Normale Methode und simuliere Streaming
-                        result = model_service_client.chat(
-                            message=request.message,
-                            messages=messages,
-                            conversation_id=conversation_id,
-                            max_length=request.max_length,
-                            temperature=effective_temperature,
-                            language=stream_response_language
-                        )
-                        if result:
-                            response = result.get("response", "")
-                            full_response = response
-                            # Simuliere Streaming durch Chunks (kleinere Chunks für bessere UX)
-                            chunk_size = 10
-                            for i in range(0, len(response), chunk_size):
-                                chunk = response[i:i+chunk_size]
-                                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                                # Kleine Verzögerung für bessere UX
-                                await asyncio.sleep(0.01)
-                except Exception as e:
-                    logger.error(f"Fehler bei Streaming mit Model-Service: {e}")
-                    # Fallback auf normale Methode
-                    result = model_service_client.chat(
+                    for evt in model_service_client.chat_stream_events(
                         message=request.message,
                         messages=messages,
                         conversation_id=conversation_id,
                         max_length=request.max_length,
                         temperature=effective_temperature,
-                        language=stream_response_language
-                    )
-                    if result:
-                        response = result.get("response", "")
-                        full_response = response
-                        # Simuliere Streaming durch Chunks
-                        chunk_size = 10
-                        for i in range(0, len(response), chunk_size):
-                            chunk = response[i:i+chunk_size]
-                            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                            await asyncio.sleep(0.01)
+                        language=stream_response_language,
+                        profile=request.profile
+                    ):
+                        if isinstance(evt, dict):
+                            # avoid duplicate meta: main already emits it
+                            if "meta" in evt:
+                                continue
+                            if isinstance(evt.get("chunk"), str):
+                                full_response += evt["chunk"]
+                                trace.add_chunk(evt["chunk"])
+                            if isinstance(evt.get("tool_call"), dict):
+                                tc = evt["tool_call"]
+                                trace.add_tool_call(
+                                    name=str(tc.get("name") or ""),
+                                    arguments=tc.get("arguments"),
+                                    call_id=tc.get("call_id"),
+                                )
+                            if isinstance(evt.get("tool_result"), dict):
+                                tr = evt["tool_result"]
+                                trace.add_tool_result(
+                                    name=str(tr.get("name") or ""),
+                                    ok=bool(tr.get("ok", False)),
+                                    call_id=tr.get("call_id"),
+                                    preview=tr.get("result_preview"),
+                                    error=tr.get("error"),
+                                )
+                            if evt.get("replace") and isinstance(evt.get("content"), str):
+                                full_response = evt["content"]
+                            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                            await asyncio.sleep(0)  # cooperative yield
+                except Exception as e:
+                    error_msg = f"Model-Service Streaming Fehler: {e}"
+                    logger.error(error_msg)
+                    yield f"data: {json.dumps({'error': error_msg})}\n\n"
+                    trace.finish(error=error_msg, full_response=full_response)
+                    generation_traces.persist(trace)
+                    return
             else:
-                # Lokales Streaming
-                for chunk in model_manager.generate_stream(
-                    messages,
-                    max_length=request.max_length,
-                    temperature=effective_temperature
-                ):
-                    full_response += chunk
-                    yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+                # Kein Modell geladen und kein Model-Service - Fehler
+                error_msg = "Kein Modell geladen und Model-Service nicht verfügbar"
+                logger.error(error_msg)
+                yield f"data: {json.dumps({'error': error_msg})}\n\n"
+                trace.finish(error=error_msg, full_response=full_response)
+                generation_traces.persist(trace)
+                return
+            
+            # Optional: "Polish" Pass für offensichtliche Output-Probleme (z.B. gemischte Alphabete/Replacement char).
+            # Hinweis: Rewrite ist teuer -> nur bei klaren Defekten versuchen.
+            try:
+                polished = None
+                if quality_manager.needs_polish(full_response, language=stream_response_language or "de"):
+                    def _polish_generate_fn(polish_messages, max_length: int, temperature: float):
+                        if USE_MODEL_SERVICE and model_service_client and model_service_client.is_available():
+                            r = model_service_client.chat(
+                                message="polish",
+                                messages=polish_messages,
+                                conversation_id=None,
+                                max_length=max_length,
+                                temperature=temperature,
+                                language=stream_response_language,
+                                profile=None,
+                                stream=False,
+                            )
+                            return (r or {}).get("response")
+                        # Fallback: lokaler ModelManager
+                        return model_manager.generate(
+                            polish_messages,
+                            max_length=max_length,
+                            temperature=temperature,
+                            is_coding=False,
+                        )
+
+                    polished = quality_manager.polish_response(
+                        question=request.message,
+                        draft_response=full_response,
+                        generate_fn=_polish_generate_fn,
+                        language=stream_response_language or "de",
+                        max_length=min(384, int(request.max_length or 384)),
+                        temperature=0.0,
+                    )
+                if polished and polished.strip() and polished.strip() != (full_response or "").strip():
+                    full_response = polished
+                    replaced_response = polished
+                    # UI darf den Text ersetzen (Fix für "marmelадe"/"Schritт" usw.)
+                    yield f"data: {json.dumps({'replace': True, 'content': full_response})}\n\n"
+            except Exception as e:
+                logger.debug(f"Polish übersprungen/fehlgeschlagen: {e}")
+
+            # Leichtes Normalisieren (nur Regex), damit Streaming-Endtext sauber ist
+            # (z.B. "währendUDP", "Step 2", "Backend-Servers", "1\\.")
+            try:
+                if full_response:
+                    normalized = model_manager._clean_content(full_response)
+                    if normalized and normalized.strip() and normalized.strip() != full_response.strip():
+                        full_response = normalized
+                        replaced_response = full_response
+                        yield f"data: {json.dumps({'replace': True, 'content': full_response})}\n\n"
+            except Exception as e:
+                logger.debug(f"Light-normalize übersprungen/fehlgeschlagen: {e}")
+
+            # Fertig-Signal
+            yield f"data: {json.dumps({'done': True})}\n\n"
             
             # Speichere vollständige Antwort
             if full_response:
                 conversation_manager.add_message(conversation_id, "assistant", full_response)
+            trace.finish(full_response=full_response, replaced_response=replaced_response)
+            generation_traces.persist(trace)
+            # #region agent log
+            try:
+                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C2","location":"main.py:980","message":"Streaming completed","data":{"total_chunks":trace.chunks_total,"response_length":len(full_response),"duration":time_module.time()-stream_start_time},"timestamp":int(time_module.time()*1000)})+"\n")
+            except: pass
+            # #endregion
         except Exception as e:
             logger.error(f"Fehler bei Streaming: {e}")
+            # #region agent log
+            try:
+                import time as time_module
+                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C2","location":"main.py:985","message":"Streaming error","data":{"error":str(e)},"timestamp":int(time_module.time()*1000)})+"\n")
+            except: pass
+            # #endregion
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            try:
+                # trace may not exist if exception happened very early
+                if 'trace' in locals():
+                    trace.finish(error=str(e), full_response=locals().get("full_response", ""))
+                    generation_traces.persist(trace)
+            except Exception:
+                pass
     
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/debug/generations")
+async def debug_generations(limit: int = 10):
+    """Gibt die letzten Generation-Traces zurück (Diagnostik)."""
+    return {"traces": generation_traces.get_recent(limit=limit)}
+
+
+@app.get("/debug/generations/{trace_id}")
+async def debug_generation(trace_id: str):
+    """Gibt einen einzelnen Trace zurück (Diagnostik)."""
+    t = generation_traces.get_by_id(trace_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Trace nicht gefunden")
+    return t
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -1071,7 +1232,16 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         sources_context = ""
         enhanced_message = request.message
         
-        if quality_manager.settings.get("auto_web_search", False):
+        # RAG nur, wenn es nicht ohnehin ein expliziter "Suche/Google/Web" Befehl ist.
+        is_explicit_search_command = False
+        try:
+            from tool_detection import detect_web_search_query
+            q = detect_web_search_query(request.message or "")
+            is_explicit_search_command = bool(q and re.search(r"\b(suche|finde|google|websuche)\b", (request.message or "").lower()))
+        except Exception:
+            is_explicit_search_command = False
+
+        if quality_manager.settings.get("auto_web_search", False) and not is_explicit_search_command:
             # Prüfe ob Frage Web-Search benötigt (Fakten, aktuelle Infos, etc.)
             if quality_manager._needs_web_search(request.message):
                 try:

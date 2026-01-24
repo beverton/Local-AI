@@ -9,6 +9,7 @@ let currentImageAbortController = null;
 let uploadedFilesList = []; // Liste der hochgeladenen Dateien
 let settings = {
     temperature: 0.3,  // Niedriger für bessere Qualität (weniger "Jibberish")
+    max_length: 2048,  // Default für Progress & Request (wird aus /performance/settings überschrieben)
     preferenceLearning: false,
     transcriptionLanguage: ""  // Leerer String = Auto-Erkennung
 };
@@ -1254,15 +1255,15 @@ async function sendMessage() {
         let retries = 0;
         const maxRetries = 3;
         
-        // FIX: Streaming temporär deaktiviert - verwende normale Methode
-        // Streaming IMMER aktivieren für Satz-für-Satz Anzeige
-        // try {
-        //     await sendMessageStream(fullMessage, conversationIdAtStart, loadingId);
-        //     return; // Streaming beendet, keine weitere Verarbeitung nötig
-        // } catch (error) {
-        //     // Bei Fehler, fallback auf normale Methode
-        //     console.warn('Streaming fehlgeschlagen, verwende normale Methode:', error);
-        // }
+        // Streaming als Standard (SSE über /chat/stream).
+        // Wenn Streaming aus irgendeinem Grund fehlschlägt, fallback auf /chat (non-stream).
+        try {
+            await sendMessageStream(fullMessage, conversationIdAtStart, loadingId);
+            return; // Streaming beendet, keine weitere Verarbeitung nötig
+        } catch (error) {
+            console.warn('Streaming fehlgeschlagen, verwende normale Methode:', error);
+            // Weiter mit Fallback unten
+        }
         
         while (retries < maxRetries) {
             try {
@@ -1844,6 +1845,17 @@ async function loadPerformanceSettings() {
             } else {
                 primaryBudgetSlider.value = data.primary_budget_percent;
                 primaryBudgetValue.textContent = `${data.primary_budget_percent}%`;
+            }
+        }
+        // max_length für Chat (UI/Streaming Progress)
+        if (data.max_length !== undefined && data.max_length !== null) {
+            settings.max_length = data.max_length;
+        }
+        // temperature ggf. ebenfalls aus Performance Settings übernehmen, wenn UI noch nicht verändert wurde
+        if (data.temperature !== undefined && data.temperature !== null) {
+            // nicht hart überschreiben, wenn User bereits Slider bewegt hat
+            if (typeof settings.temperature !== 'number' || isNaN(settings.temperature)) {
+                settings.temperature = data.temperature;
             }
         }
     } catch (error) {
@@ -2894,7 +2906,8 @@ async function sendMessageStream(message, conversationId, loadingId) {
             body: JSON.stringify({
                 message: message,
                 conversation_id: conversationId,
-                temperature: settings.temperature
+                temperature: settings.temperature,
+                max_length: settings.max_length || 2048
             }),
             signal: currentAbortController?.signal
         });
@@ -2922,6 +2935,7 @@ async function sendMessageStream(message, conversationId, loadingId) {
             <div class="message-avatar">${avatar}</div>
             <div class="message-content">
                 <span id="streaming-content-${messageId}"></span>
+                <div id="tool-status-${messageId}" class="tool-status" style="display: none;"></div>
                 <div id="streaming-progress-${messageId}" class="streaming-progress" style="display: none;">
                     <div class="progress-bar-container">
                         <div class="progress-bar" id="progress-bar-${messageId}"></div>
@@ -2940,18 +2954,30 @@ async function sendMessageStream(message, conversationId, loadingId) {
         
         chatMessages.appendChild(messageDiv);
         const contentElement = document.getElementById(`streaming-content-${messageId}`);
+        const toolStatusElement = document.getElementById(`tool-status-${messageId}`);
         const progressContainer = document.getElementById(`streaming-progress-${messageId}`);
         const progressBar = document.getElementById(`progress-bar-${messageId}`);
         const progressText = document.getElementById(`progress-text-${messageId}`);
         
         let fullResponse = '';
         let tokenCount = 0;
-        // max_length wird vom Model Service verwaltet
-        const maxTokens = 2048; // Fallback für Progress-Berechnung
+        // max_length für Progress-Berechnung (pro Beitrag)
+        const maxTokens = settings.max_length || 2048;
         
         // Erstelle UpdateQueue für DOM-Updates
         const updateQueue = new UpdateQueue();
         let chunkCount = 0;
+        
+        // Tool status tracking
+        const toolStatusMap = {
+            'read_file': { icon: '📄', label: 'Lese Datei' },
+            'write_file': { icon: '✍️', label: 'Schreibe Datei' },
+            'list_directory': { icon: '📁', label: 'Liste Verzeichnis' },
+            'delete_file': { icon: '🗑️', label: 'Lösche Datei' },
+            'file_exists': { icon: '🔍', label: 'Prüfe Datei' },
+            'web_search': { icon: '🌐', label: 'Suche im Web' }
+        };
+        let activeToolCalls = new Map();
         
         let lastLogTime = Date.now();
         let totalChunks = 0;
@@ -2973,6 +2999,92 @@ async function sendMessageStream(message, conversationId, loadingId) {
                 if (line.startsWith('data: ')) {
                     try {
                         const data = JSON.parse(line.slice(6));
+                        
+                        // Handle tool_call event
+                        if (data.tool_call) {
+                            const tc = data.tool_call;
+                            const toolName = tc.name || '';
+                            const callId = tc.call_id || '';
+                            const toolInfo = toolStatusMap[toolName] || { icon: '🔧', label: toolName };
+                            
+                            activeToolCalls.set(callId, { name: toolName, startTime: Date.now() });
+                            
+                            if (toolStatusElement) {
+                                const toolLabel = tc.requires_confirmation 
+                                    ? `${toolInfo.icon} ${toolInfo.label} (Bestätigung erforderlich)`
+                                    : `${toolInfo.icon} ${toolInfo.label}...`;
+                                toolStatusElement.innerHTML = `<div class="tool-status-item">${toolLabel}</div>`;
+                                toolStatusElement.style.display = 'block';
+                            }
+                            scheduleScrollUpdate();
+                            continue;
+                        }
+                        
+                        // Handle tool_result event
+                        if (data.tool_result) {
+                            const tr = data.tool_result;
+                            const callId = tr.call_id || '';
+                            const toolCall = activeToolCalls.get(callId);
+                            
+                            if (toolCall) {
+                                const toolInfo = toolStatusMap[toolCall.name] || { icon: '🔧', label: toolCall.name };
+                                const duration = Date.now() - toolCall.startTime;
+                                
+                                if (tr.ok) {
+                                    if (toolStatusElement) {
+                                        const existing = toolStatusElement.querySelector(`[data-call-id="${callId}"]`);
+                                        if (existing) {
+                                            existing.innerHTML = `${toolInfo.icon} ${toolInfo.label} ✓ (${duration}ms)`;
+                                            existing.classList.add('tool-success');
+                                        } else {
+                                            const item = document.createElement('div');
+                                            item.className = 'tool-status-item tool-success';
+                                            item.setAttribute('data-call-id', callId);
+                                            item.innerHTML = `${toolInfo.icon} ${toolInfo.label} ✓ (${duration}ms)`;
+                                            toolStatusElement.appendChild(item);
+                                        }
+                                    }
+                                } else {
+                                    if (toolStatusElement) {
+                                        const existing = toolStatusElement.querySelector(`[data-call-id="${callId}"]`);
+                                        if (existing) {
+                                            existing.innerHTML = `${toolInfo.icon} ${toolInfo.label} ✗ (${tr.error || 'Fehler'})`;
+                                            existing.classList.add('tool-error');
+                                        } else {
+                                            const item = document.createElement('div');
+                                            item.className = 'tool-status-item tool-error';
+                                            item.setAttribute('data-call-id', callId);
+                                            item.innerHTML = `${toolInfo.icon} ${toolInfo.label} ✗ (${tr.error || 'Fehler'})`;
+                                            toolStatusElement.appendChild(item);
+                                        }
+                                    }
+                                }
+                                
+                                activeToolCalls.delete(callId);
+                                
+                                // Hide tool status if all tools are done (after a short delay)
+                                if (activeToolCalls.size === 0) {
+                                    setTimeout(() => {
+                                        if (toolStatusElement && activeToolCalls.size === 0) {
+                                            toolStatusElement.style.display = 'none';
+                                        }
+                                    }, 2000);
+                                }
+                            }
+                            scheduleScrollUpdate();
+                            continue;
+                        }
+                        
+                        if (data.replace && typeof data.content === 'string') {
+                            // Server sendet eine finale, korrigierte Version (z.B. Polish-Rewrite)
+                            fullResponse = data.content;
+                            if (contentElement) {
+                                contentElement.innerHTML = formatMessageContent(fullResponse);
+                                initializeCodeCopyButtons(messageDiv);
+                            }
+                            scheduleScrollUpdate();
+                            continue;
+                        }
                         if (data.chunk) {
                             const beforeUpdateTime = Date.now();
                             totalChunks++;
@@ -3011,7 +3123,7 @@ async function sendMessageStream(message, conversationId, loadingId) {
                                 updateQueue.schedule('progress', () => {
                                     const progress = Math.min((tokenCount / maxTokens) * 100, 100);
                                     progressBar.style.width = `${progress}%`;
-                                    progressText.textContent = `${tokenCount}/${maxTokens} Tokens (${Math.round(progress)}%)`;
+                                    progressText.textContent = `${tokenCount}/${maxTokens} Tokens (${Math.round(progress)}%) • ${totalChunks} Chunks`;
                                 });
                                 
                                 const progressUpdateDuration = Date.now() - progressUpdateStartTime;
@@ -3045,6 +3157,13 @@ async function sendMessageStream(message, conversationId, loadingId) {
                             // Verstecke Fortschrittsanzeige
                             if (progressContainer) {
                                 progressContainer.style.display = 'none';
+                            }
+                            
+                            // Verstecke Tool-Status nach kurzer Verzögerung (falls noch sichtbar)
+                            if (toolStatusElement) {
+                                setTimeout(() => {
+                                    toolStatusElement.style.display = 'none';
+                                }, 1500);
                             }
                             
                             // Finale Formatierung mit Code-Blöcken

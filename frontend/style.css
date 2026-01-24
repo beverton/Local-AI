@@ -377,6 +377,7 @@ body {
 .chat-messages {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px;
     display: flex;
     flex-direction: column;
@@ -399,6 +400,7 @@ body {
     display: flex;
     gap: 15px;
     max-width: 85%;
+    min-width: 0; /* verhindert horizontales Aufblasen in Flex */
     animation: fadeIn 0.3s;
 }
 
@@ -438,7 +440,11 @@ body {
     padding: 12px 16px;
     border-radius: 12px;
     line-height: 1.6;
-    word-wrap: break-word;
+    max-width: 100%;
+    min-width: 0; /* erlaubt Umbruch statt Layout-Overflow */
+    overflow-x: hidden;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 /* Markdown in Messages */
@@ -537,6 +543,32 @@ body {
 }
 
 /* Fortschrittsanzeige für Streaming */
+.tool-status {
+    margin: 8px 0;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    font-size: 0.9em;
+    color: var(--text-secondary);
+}
+
+.tool-status-item {
+    margin: 4px 0;
+    padding: 4px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tool-status-item.tool-success {
+    color: var(--success);
+}
+
+.tool-status-item.tool-error {
+    color: var(--error);
+}
+
 .streaming-progress {
     margin-top: 10px;
     margin-bottom: 5px;
@@ -572,6 +604,7 @@ body {
     overflow: hidden;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
+    max-width: 100%;
 }
 
 .code-block-header {
@@ -631,6 +664,7 @@ body {
     padding: 16px;
     background: var(--bg-tertiary);
     overflow-x: auto;
+    max-width: 100%;
     font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
     font-size: 14px;
     line-height: 1.6;
@@ -942,6 +976,10 @@ body {
     resize: none;
     max-height: 200px;
     min-height: 44px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 #messageInput:focus {

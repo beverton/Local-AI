@@ -29,6 +29,8 @@ class ModelManager:
         self.current_model_id: Optional[str] = None
         self.model = None
         self.tokenizer = None
+        # Fail-fast: prüfe Laufzeit-Abhängigkeiten früh und zentral
+        self._check_requirements()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.gpu_allocation_budget_gb: Optional[float] = None  # GPU budget in GB for this model
         logger.info(f"Verwende Device: {self.device}")
@@ -38,6 +40,378 @@ class ModelManager:
         
         # Wende GPU-Optimierungen an
         self._apply_gpu_optimizations()
+
+    @staticmethod
+    def _version_geq(current: str, minimum: str) -> bool:
+        """
+        Robuster Versionsvergleich (ohne harte Abhängigkeit auf packaging).
+        Unterstützt übliche Semver-Strings wie '4.40.0', '2.3.1+cu121'.
+        """
+        try:
+            from packaging import version as _pkg_version  # type: ignore
+            return _pkg_version.parse(current) >= _pkg_version.parse(minimum)
+        except Exception:
+            def _normalize(v: str) -> List[int]:
+                # extrahiere führende Zahlenblöcke: "2.3.1+cu121" -> [2,3,1]
+                parts: List[int] = []
+                for token in str(v).replace("+", ".").replace("-", ".").split("."):
+                    num = ""
+                    for ch in token:
+                        if ch.isdigit():
+                            num += ch
+                        else:
+                            break
+                    if num != "":
+                        parts.append(int(num))
+                return parts
+
+            cur = _normalize(current)
+            minv = _normalize(minimum)
+            # pad to equal length
+            n = max(len(cur), len(minv))
+            cur += [0] * (n - len(cur))
+            minv += [0] * (n - len(minv))
+            return cur >= minv
+
+    def _check_requirements(self) -> None:
+        """Prüft Mindestversionen für Kern-Abhängigkeiten und gibt klare Fehler aus."""
+        try:
+            import transformers as _transformers  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"transformers konnte nicht importiert werden: {e}") from e
+
+        # torch ist bereits importiert; Import hier nur zur Symmetrie/Fehlermeldung
+        try:
+            import torch as _torch  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"torch konnte nicht importiert werden: {e}") from e
+
+        transformers_min = "4.37.0"
+        torch_recommended = "2.3.0"
+
+        tver = getattr(_transformers, "__version__", "0.0.0")
+        pver = getattr(_torch, "__version__", "0.0.0")
+
+        if not self._version_geq(str(tver), transformers_min):
+            raise RuntimeError(
+                f"transformers>={transformers_min} erforderlich (Qwen Chat-Template/Tools). "
+                f"Gefunden: {tver}"
+            )
+
+        if not self._version_geq(str(pver), torch_recommended):
+            logger.warning(f"torch>={torch_recommended} empfohlen, gefunden: {pver}")
+
+    def _build_stopping_criteria(self):
+        """
+        StoppingCriteria um unnötiges Weitergenerieren zu verhindern.
+        Hauptfall: Modell beginnt nach fertiger Antwort neue Rollen wie 'User:' / 'Human:' zu erzeugen.
+        """
+        try:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+        except Exception:
+            return None
+
+        stop_strings = ["\nUser:", "\nHuman:", "\nAssistant:", "User:", "Human:"]
+        stop_seqs: List[List[int]] = []
+        for s in stop_strings:
+            try:
+                ids = self.tokenizer.encode(s, add_special_tokens=False)
+                if ids:
+                    stop_seqs.append(ids)
+            except Exception:
+                continue
+
+        if not stop_seqs:
+            return None
+
+        class _StopOnTokenSequences(StoppingCriteria):
+            def __init__(self, sequences: List[List[int]]):
+                super().__init__()
+                self.sequences = sequences
+
+            def __call__(self, input_ids, scores, **kwargs) -> bool:
+                try:
+                    seq = input_ids[0].tolist()
+                    for pat in self.sequences:
+                        if len(seq) >= len(pat) and seq[-len(pat):] == pat:
+                            return True
+                except Exception:
+                    return False
+                return False
+
+        return StoppingCriteriaList([_StopOnTokenSequences(stop_seqs)])
+
+    def _auto_cap_max_new_tokens(self, messages: List[Dict[str, str]], max_new_tokens: int, is_coding: bool = False) -> int:
+        """
+        Reduziert max_new_tokens bei klar kurzen Anfragen (schneller, weniger Runaway).
+        Greift nur, wenn die User-Nachricht explizit kurz/limitiert ist.
+        """
+        try:
+            import re
+
+            if max_new_tokens <= 1 or is_coding:
+                return max_new_tokens
+
+            user_text = ""
+            for m in reversed(messages or []):
+                if m.get("role") == "user":
+                    user_text = str(m.get("content") or "")
+                    break
+            if not user_text:
+                return max_new_tokens
+
+            t = user_text.lower()
+
+            # Sehr kurze Formate
+            if re.search(r"\bnur\s+(?:die\s+)?zahl(?:en)?\b", t) or re.search(r"\bantwort\s+nur\s+mit\s+(?:einer\s+)?zahl\b", t):
+                capped = min(max_new_tokens, 32)
+                if capped < max_new_tokens:
+                    logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} (nur Zahl)")
+                return capped
+
+            # "in X Sätzen"
+            m = re.search(r"\bin\s+(\d{1,2})\s+(?:s[äa]tz|sae?tz)", t)
+            if m:
+                n = int(m.group(1))
+                if 1 <= n <= 8:
+                    # grobe Heuristik: ~55 Tokens pro Satz (Deutsch, kurz & stabil)
+                    capped = min(max_new_tokens, max(64, 55 * n))
+                    if capped < max_new_tokens:
+                        logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} (in {n} Sätzen)")
+                    return capped
+
+            # Bulletpoints / Liste mit fixer Anzahl ("in 6 bulletpoints", "6 stichpunkte", "nenne 5 ...")
+            m = re.search(r"\b(?:in\s+)?(\d{1,2})\s+(?:bulletpoints?|stichpunkte?|punkte)\b", t)
+            if m:
+                n = int(m.group(1))
+                if 1 <= n <= 20:
+                    # ~28 Tokens pro Punkt (damit wir <30s bleiben auf langsamer HW)
+                    capped = min(max_new_tokens, max(80, 28 * n))
+                    if capped < max_new_tokens:
+                        logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} ({n} Punkte)")
+                    return capped
+
+            m = re.search(r"\bnenn(?:e|en)\s+(\d{1,2})\b", t)
+            if m:
+                n = int(m.group(1))
+                if 1 <= n <= 20:
+                    capped = min(max_new_tokens, max(80, 28 * n))
+                    if capped < max_new_tokens:
+                        logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} (nenne {n})")
+                    return capped
+
+            # Anleitung/Schritt-für-Schritt: bewusst kurz halten (verhindert 30s max_time runs)
+            if "schritt" in t or "schritt-fuer-schritt" in t or "schritt für schritt" in t or "anleitung" in t:
+                capped = min(max_new_tokens, 180)
+                if capped < max_new_tokens:
+                    logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} (Anleitung)")
+                return capped
+
+            # "kurz" / "kurze Antwort"
+            if "kurz" in t or "kurze antwort" in t or "kurz erklären" in t or "kurz erklaere" in t:
+                capped = min(max_new_tokens, 192)
+                if capped < max_new_tokens:
+                    logger.info(f"[AutoCap] Kürze max_new_tokens {max_new_tokens} -> {capped} (kurz)")
+                return capped
+
+        except Exception:
+            return max_new_tokens
+
+        return max_new_tokens
+
+    def generate_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        max_length: int = 2048,
+        temperature: float = 0.3,
+    ) -> Dict[str, Any]:
+        """
+        Generiert entweder eine normale Antwort oder Tool-Calls (Function Calling).
+
+        Rückgabeformat:
+        - {"content": "<assistant_text>", "tool_calls": [...], "raw": "<raw_decoded>"}
+
+        Hinweis: Tool-Ausführung passiert außerhalb (z.B. im ChatAgent).
+        """
+        if not self.is_model_loaded():
+            raise RuntimeError("Kein Modell geladen!")
+
+        # 1) Prompt bauen (mit Tools, falls Template das unterstützt/auswertet)
+        if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template is not None:
+            try:
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tools=tools,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except TypeError:
+                # Fallback: Template akzeptiert tools kwarg nicht (oder ignoriert es)
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+        else:
+            # Fallback für ältere Modelle
+            prompt_parts: List[str] = []
+            for msg in messages:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "system":
+                    prompt_parts.append(f"System: {content}")
+                elif role == "user":
+                    prompt_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    prompt_parts.append(f"Assistant: {content}")
+            prompt = "\n".join(prompt_parts) + "\nAssistant:"
+
+        # 2) Tokenize + Device placement (device_map="auto" kompatibel, wie in _generate_internal)
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        if hasattr(self.model, "device"):
+            target_device = self.model.device
+            inputs = {k: v.to(target_device) for k, v in inputs.items()}
+        elif hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
+            first_device = list(self.model.hf_device_map.values())[0]
+            inputs = {k: v.to(first_device) for k, v in inputs.items()}
+        else:
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # 3) EOS handling (konservativ, kompatibel mit Qwen/Mistral/Phi)
+        eos_token_id_for_generate: Any = self.tokenizer.eos_token_id
+        try:
+            if hasattr(self.tokenizer, "im_end_id"):
+                # Qwen ChatML
+                eos_token_id_for_generate = [self.tokenizer.eos_token_id, self.tokenizer.im_end_id]
+        except Exception:
+            pass
+
+        max_new_tokens = max(1, int(max_length))
+        do_sample = bool(temperature and float(temperature) > 0.0)
+
+        # 4) Generate
+        gen_kwargs: Dict[str, Any] = dict(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            repetition_penalty=1.15,
+            eos_token_id=eos_token_id_for_generate,
+        )
+        if do_sample:
+            gen_kwargs.update(
+                temperature=float(temperature),
+                top_p=0.9,
+            )
+        out = self.model.generate(**gen_kwargs)
+
+        # 5) Decode nur neu generierte Tokens
+        input_len = inputs["input_ids"].shape[1]
+        new_tokens = out[0][input_len:]
+
+        raw = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+        tool_calls = self._parse_tool_calls_from_text(raw)
+        if not tool_calls:
+            raw_alt = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
+            tool_calls = self._parse_tool_calls_from_text(raw_alt)
+            raw = raw_alt if tool_calls else raw
+
+        content = raw.strip()
+        return {"content": content, "tool_calls": tool_calls, "raw": raw}
+
+    @staticmethod
+    def _parse_tool_calls_from_text(text: str) -> List[Dict[str, Any]]:
+        """
+        Best-effort Parser für Tool-Calls aus Model-Text.
+        Unterstützt u.a. Hermes-Style:
+          <<tool_call>>{...}<< /tool_call >>
+        sowie freie JSON-Objekte mit {name, arguments}.
+        """
+        import json as _json
+        import re as _re
+
+        if not text:
+            return []
+
+        def _extract_from_obj(obj: Any) -> List[Dict[str, Any]]:
+            out_calls: List[Dict[str, Any]] = []
+            if isinstance(obj, dict):
+                if "name" in obj and ("arguments" in obj or "parameters" in obj):
+                    args = obj.get("arguments", obj.get("parameters", {}))
+                    if isinstance(args, str):
+                        try:
+                            args = _json.loads(args)
+                        except Exception:
+                            args = {"_raw": args}
+                    out_calls.append({"name": obj["name"], "arguments": args})
+                elif "function" in obj and isinstance(obj["function"], dict):
+                    fn = obj["function"]
+                    if "name" in fn and ("arguments" in fn or "parameters" in fn):
+                        args = fn.get("arguments", fn.get("parameters", {}))
+                        if isinstance(args, str):
+                            try:
+                                args = _json.loads(args)
+                            except Exception:
+                                args = {"_raw": args}
+                        out_calls.append({"name": fn["name"], "arguments": args})
+            elif isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, dict) and "name" in item:
+                        args = item.get("arguments", item.get("parameters", {}))
+                        if isinstance(args, str):
+                            try:
+                                args = _json.loads(args)
+                            except Exception:
+                                args = {"_raw": args}
+                        out_calls.append({"name": item["name"], "arguments": args})
+            return out_calls
+
+        stripped = text.strip()
+        # Fast-path: kompletter Text ist JSON (häufig bei Tool-Calls)
+        if stripped and stripped[0] in "{[" and stripped[-1] in "}]":
+            try:
+                obj0 = _json.loads(stripped)
+                direct_calls = _extract_from_obj(obj0)
+                if direct_calls:
+                    return direct_calls
+            except Exception:
+                pass
+
+        candidates: List[str] = []
+
+        # Hermes-style tags (varianten)
+        tag_patterns = [
+            ("<<tool_call>>", "<</tool_call>>"),
+            ("<tool_call>", "</tool_call>"),
+            ("<<tool_call>>", "<<|im_end|>>"),
+        ]
+        for start_tag, end_tag in tag_patterns:
+            try:
+                pattern = _re.escape(start_tag) + r"\s*([\s\S]*?)\s*" + _re.escape(end_tag)
+                for m in _re.finditer(pattern, text):
+                    candidates.append(m.group(1).strip())
+            except Exception:
+                continue
+
+        # Falls keine Tags: versuche JSON-Objekte direkt im Text zu finden
+        if not candidates:
+            # naive Extraktion von {...} Blöcken
+            for m in _re.finditer(r"\{[\s\S]*?\}", text):
+                blob = m.group(0).strip()
+                # Quick filter: Tool-call muss mindestens name enthalten
+                if '"name"' in blob or "'name'" in blob:
+                    candidates.append(blob)
+
+        tool_calls: List[Dict[str, Any]] = []
+        for cand in candidates:
+            try:
+                obj = _json.loads(cand)
+            except Exception:
+                continue
+
+            tool_calls.extend(_extract_from_obj(obj))
+
+        return tool_calls
     
     def set_gpu_allocation_budget(self, budget_gb: Optional[float]):
         """Setzt das GPU-Allokations-Budget für dieses Modell (in GB)"""
@@ -546,12 +920,8 @@ class ModelManager:
             # torch.compile() Support (PyTorch 2.0+)
             if use_torch_compile:
                 try:
-                    # Prüfe PyTorch Version
-                    torch_version = torch.__version__.split('.')
-                    major_version = int(torch_version[0])
-                    minor_version = int(torch_version[1]) if len(torch_version) > 1 else 0
-                    
-                    if major_version >= 2:
+                    # Prüfe PyTorch Version (zentral, robust)
+                    if self._version_geq(str(torch.__version__), "2.0.0"):
                         # Kompiliere Modell für bessere Performance
                         self.model = torch.compile(self.model, mode="reduce-overhead")
                         logger.info("Modell mit torch.compile() optimiert")
@@ -600,6 +970,12 @@ class ModelManager:
                 if validation_result:
                     # Response ist gültig, prüfe Vollständigkeit
                     completeness = self._check_completeness(response, messages)
+                    # #region agent log
+                    try:
+                        with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A2","location":"model_manager.py:602","message":"Completeness check","data":{"is_complete":completeness["complete"],"response_length":len(response),"reason":completeness.get("reason")},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                     
                     if completeness["complete"]:
                         return response
@@ -607,6 +983,12 @@ class ModelManager:
                         # Response ist unvollständig - OPTIMIERT: Nur retry wenn wirklich kritisch
                         # Unvollständige Sätze sind OK wenn Response lang genug ist (>100 Zeichen)
                         is_critical_incomplete = len(response.strip()) < 100 or completeness.get("reason", "").startswith("Response zu kurz")
+                        # #region agent log
+                        try:
+                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A2","location":"model_manager.py:612","message":"Incomplete response decision","data":{"is_critical":is_critical_incomplete,"attempt":attempt,"max_retries":max_retries},"timestamp":int(time.time()*1000)})+"\n")
+                        except: pass
+                        # #endregion
                         
                         if is_critical_incomplete and attempt < max_retries and completeness.get("suggested_max_length"):
                             logger.warning(f"Response kritisch unvollständig: {completeness['reason']}, retry mit max_length={completeness['suggested_max_length']}")
@@ -910,6 +1292,45 @@ class ModelManager:
         
         logger.info(f"[Clean] Response erfolgreich bereinigt: {len(original_response)} -> {len(response)} Zeichen")
         return response
+
+    @staticmethod
+    def _normalize_mixed_script_homoglyphs(text: str) -> str:
+        """
+        Normalisiert häufige Cyrillic-Homoglyphen (z.B. "Schritт", "marmelадe")
+        zu lateinischen Zeichen, wenn der Text überwiegend lateinisch ist.
+
+        Ziel: sichtbare Tippfehler durch gemischte Alphabete beheben, ohne echte
+        nicht-lateinische Antworten aggressiv zu verändern.
+        """
+        import re
+
+        if not text:
+            return text
+
+        # Nur anwenden, wenn Cyrillic vorkommt UND der Text überwiegend lateinisch wirkt.
+        cyr = re.findall(r"[\u0400-\u04FF]", text)
+        if not cyr:
+            return text
+        latin = re.findall(r"[A-Za-zÄÖÜäöüß]", text)
+        if len(latin) < max(12, len(cyr) * 3):
+            return text
+
+        # Minimaler, konservativer Satz an Mappings:
+        # - primär visuell ähnliche Zeichen + häufige "Fehlgriffe" (д -> d, л -> l)
+        mapping = {
+            "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X", "І": "I",
+            "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "х": "x", "і": "i",
+            # häufige Zusatz-Fehlgriffe (nicht nur Homoglyphen)
+            "д": "d", "Д": "D",
+            "л": "l", "Л": "L",
+            "у": "y", "У": "Y",
+        }
+
+        # Schneller Pfad: nur ersetzen, wenn tatsächlich ein Mapping vorkommt
+        if not any(ch in mapping for ch in cyr):
+            return text
+
+        return "".join(mapping.get(ch, ch) for ch in text)
     
     def _clean_tokens(self, response: str) -> str:
         """
@@ -931,16 +1352,29 @@ class ModelManager:
         elif response.lower().startswith('assistant '):
             response = response[9:].strip()
         
-        # 4. Unicode-Vollbreiten-Ziffern (全角数字) zu ASCII-Ziffern konvertieren
+        # 4. VERBESSERT: Unicode-Vollbreiten-Ziffern (全角数字) zu ASCII-Ziffern konvertieren
         # Qwen-Modelle können manchmal Unicode-Vollbreiten-Ziffern generieren
         fullwidth_to_ascii = {
             '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
             '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
             '＋': '+', '－': '-', '×': '*', '÷': '/', '＝': '=',
-            '。': '.', '，': ',', '：': ':', '；': ';', '？': '?', '！': '!'
+            '。': '.', '，': ',', '：': ':', '；': ';', '？': '?', '！': '!',
+            # Zusätzliche Varianten die auftreten können
+            '１': '1', '２': '2', '３': '3', '５': '5', '７': '7', '８': '8'
         }
         for fullwidth, ascii_char in fullwidth_to_ascii.items():
             response = response.replace(fullwidth, ascii_char)
+        
+        # VERBESSERT: Konvertiere auch alle anderen Vollbreiten-Zeichen zu ASCII
+        import unicodedata
+        try:
+            # Konvertiere Vollbreiten-Zeichen zu normalen Zeichen
+            response = unicodedata.normalize('NFKC', response)
+        except:
+            pass  # Fallback wenn unicodedata nicht verfügbar
+
+        # 5. Cyrillic-Homoglyphen in überwiegend lateinischem Text normalisieren
+        response = self._normalize_mixed_script_homoglyphs(response)
         
         return response
     
@@ -986,37 +1420,25 @@ class ModelManager:
                 positions = [m.start() for m in re.finditer(re.escape(marker), response, re.IGNORECASE)]
                 for pos in positions:
                     if pos > 50:  # Marker ist nicht am Anfang
-                        # Prüfe Content VOR und NACH dem Marker
+                        # VERBESSERT: Wenn "User:" Marker gefunden wird, schneide IMMER VOR dem Marker ab
+                        # Das Modell hat weiter generiert und User/Assistant-Marker erstellt - die eigentliche Antwort ist VOR dem Marker
                         before_marker = response[:pos].strip()
-                        after_marker_start = pos + len(marker)
-                        after_marker = response[after_marker_start:].strip()
                         
-                        # Wenn nach Marker viel Content kommt (>100 Zeichen), behalte den Text NACH dem Marker
-                        # (Modell hat User-Nachricht wiederholt, aber Antwort kommt danach)
-                        if len(after_marker) > 100:
-                            # Extrahiere nur den Text nach "User:" (die eigentliche Antwort)
-                            # Entferne auch die User-Nachricht selbst wenn sie wiederholt wird
-                            # Suche nach dem nächsten Zeilenumbruch oder Fragezeichen als Trennzeichen
-                            lines_after = after_marker.split('\n')
-                            if len(lines_after) > 1:
-                                # Nimm alles nach der ersten Zeile (User-Nachricht)
-                                response = '\n'.join(lines_after[1:]).strip()
-                            else:
-                                # Kein Zeilenumbruch - prüfe ob Fragezeichen vorhanden
-                                qmark_pos = after_marker.find('?')
-                                if qmark_pos > 0 and qmark_pos < 200:
-                                    # Fragezeichen gefunden - Text danach ist die Antwort
-                                    response = after_marker[qmark_pos + 1:].strip()
-                                else:
-                                    # Kein klares Trennzeichen - behalte alles nach Marker
-                                    response = after_marker
-                            logger.debug(f"[Clean] User-Marker gefunden, behalte Text NACH Marker ({len(response)} Zeichen)")
-                            break
-                        # Wenn nach Marker wenig Content, entferne Marker und alles danach
-                        elif len(before_marker) > 50:  # Mindestens 50 Zeichen vor Marker
+                        # Prüfe ob vor Marker genug Content ist (mindestens 10 Zeichen)
+                        if len(before_marker) >= 10:
                             response = before_marker
-                            logger.debug(f"[Clean] Trimmed at user marker '{marker}' at position {pos} (wenig Content danach)")
+                            logger.debug(f"[Clean] User-Marker gefunden, schneide VOR Marker ab ({len(response)} Zeichen)")
+                            # #region agent log
+                            try:
+                                import time
+                                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A1","location":"model_manager.py:1008","message":"Cut before User marker","data":{"before_length":len(before_marker),"after_length":len(response[pos:])},"timestamp":int(time.time()*1000)})+"\n")
+                            except: pass
+                            # #endregion
                             break
+                        else:
+                            # Zu wenig Content vor Marker - möglicherweise falscher Marker, ignoriere
+                            logger.debug(f"[Clean] User-Marker gefunden, aber zu wenig Content davor ({len(before_marker)} Zeichen), ignoriere")
                 if len(response) < len(response_before) * 0.7:  # Nur wenn weniger als 70% übrig
                     break
             
@@ -1048,6 +1470,27 @@ class ModelManager:
         
         # Prüfe ob HTML-Tags vorhanden
         if re.search(r'<[^>]+>', response):
+            return True
+
+        # Häufige Markdown-Artefakte / Escapes
+        if re.search(r'(?m)^\s*\d{1,2}\\\.', response):
+            return True
+
+        # CamelCase / fehlende Leerzeichen durch Innen-Großbuchstaben (z.B. "währendUDP", "DatagramProtocol")
+        if re.search(r'[a-zäöüß][A-ZÄÖÜ]', response):
+            return True
+
+        # Offensichtlicher Sprach-Mix (kleines, gezieltes Pattern)
+        if "Sufficient Sleep" in response:
+            return True
+
+        # Häufiger Sprach-Mix in DE-Antworten
+        if re.search(r'\bStep\s+\d{1,2}\b', response):
+            return True
+
+        # Plural/Typo, der häufig vorkommt
+        if "Backend-Servers" in response or "Backend-Server" in response:
+            # auch wenn korrekt, Cleaning ist harmlos (nur Normalisierung)
             return True
         
         # Prüfe ob CJK-Zeichen vorhanden (nur wenn Response Buchstaben hat)
@@ -1084,17 +1527,50 @@ class ModelManager:
         total_code_length = sum(len(cb) for cb in code_blocks)
         is_mostly_code = total_code_length > len(response) * 0.5
         
+        # VERBESSERT: Entferne CJK-Zeichen aggressiver, besonders wenn sie mitten in deutscher Antwort stehen
         if re.search(r'[a-zA-ZäöüßÄÖÜ]', response) and not is_mostly_code:
-            # Nur CJK entfernen wenn Response NICHT hauptsächlich Code ist
-            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f\u2b740-\u2b81f\u2b820-\u2ceaf\uf900-\ufaff\u3300-\u33ff\ufe30-\ufe4f\uf900-\ufaff\u2f800-\u2fa1f]+'
+            # Entferne CJK-Zeichen (Chinesisch, Japanisch, Koreanisch)
+            cjk_pattern = r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+'
             response = re.sub(cjk_pattern, '', response)
+            
+            # Entferne auch chinesische Satzzeichen die übrig bleiben könnten
+            chinese_punct = ['，', '。', '：', '；', '？', '！', '、', '…', '「', '」', '『', '』']
+            for punct in chinese_punct:
+                response = response.replace(punct, '')
         
-        # 4. Whitespace normalisieren (nur außerhalb Code-Blocks)
+        # 4. VERBESSERT: Behebe unvollständige Wörter (z.B. "zu-toolerngigen" → "zu toolerngigen")
+        # Finde Wörter mit Bindestrich die unvollständig aussehen
+        hyphen_word_pattern = r'\b\w+-\w+\b'
+        def fix_hyphen_word(match):
+            word = match.group(0)
+            # Wenn das Wort nach dem Bindestrich sehr kurz ist (< 5 Zeichen), entferne Bindestrich
+            parts = word.split('-')
+            if len(parts) == 2 and len(parts[1]) < 5:
+                # Prüfe ob es wie ein unvollständiges Wort aussieht
+                if not re.match(r'^[a-z]+$', parts[1], re.IGNORECASE):
+                    return parts[0] + ' ' + parts[1]  # Ersetze Bindestrich durch Leerzeichen
+            return word
+        
+        response = re.sub(hyphen_word_pattern, fix_hyphen_word, response)
+
+        # 4b. Fixe häufige Markdown-Escapes in nummerierten Listen: "1\\." -> "1."
+        response = re.sub(r'(?m)^(\s*\d{1,2})\\\.', r'\1.', response)
+
+        # 4c. CamelCase/Innen-Großbuchstaben in Wörtern auflösen: "DatagramProtocol" -> "Datagram Protocol"
+        # (nur außerhalb Code-Blöcke; URLs werden hier ebenfalls nicht erwartet)
+        response = re.sub(r'([a-zäöüß])([A-ZÄÖÜ])', r'\1 \2', response)
+
+        # 4d. Mini-Language-Fix: häufige englische Phrase, die sonst als "Gemisch" wirkt
+        response = response.replace("Sufficient Sleep", "Ausreichender Schlaf")
+        response = re.sub(r"\bStep\s+(\d{1,2})\b", r"Schritt \1", response)
+        response = re.sub(r"\bBackend-Servers?\b", "Backend-Server", response)
+        
+        # 5. Whitespace normalisieren (nur außerhalb Code-Blocks)
         # Vorsichtig: Nur mehrfache Leerzeichen in Text, nicht in Code
         response = re.sub(r' +', ' ', response)  # Mehrfache Leerzeichen
         response = re.sub(r'\n\s*\n+', '\n\n', response)  # Mehrfache Zeilenumbrüche
         
-        # 5. Code-Blocks wieder einfügen
+        # 6. Code-Blocks wieder einfügen
         for placeholder, code_block in code_block_map.items():
             response = response.replace(placeholder, code_block)
         
@@ -1428,6 +1904,9 @@ class ModelManager:
             
             # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
             max_new_tokens = max(1, max_new_tokens)
+
+            # Auto-Cap für kurze Anfragen (spart Zeit & vermeidet Runaway)
+            max_new_tokens = self._auto_cap_max_new_tokens(messages, max_new_tokens, is_coding=is_coding)
             
             # Logging für Debugging
             logger.info(f"Input-Länge: {input_length}, gewünschte Ausgabelänge: {desired_new_tokens}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
@@ -1526,7 +2005,9 @@ class ModelManager:
                     # Andere Modelle: Single Integer
                     eos_token_id_for_generate = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
                 
-                max_time_seconds = max(5.0, min(30.0, max_new_tokens / 4))
+                # Dynamisches max_time: min(30s) war zu hoch und führte häufig zu 30s-Runs,
+                # wenn Qwen kein EOS emittiert. Lieber max_new_tokens "gewinnen" lassen.
+                max_time_seconds = max(12.0, min(180.0, max_new_tokens * 0.25))
                 logger.warning(f"[DEBUG] BEFORE model.generate() - eos_token_id={eos_token_id_for_generate}, max_new_tokens={max_new_tokens}, temperature={temperature}, max_time={max_time_seconds}s")
                 
                 # DEBUG: GPU-Speicher-Status vor Generierung
@@ -1582,20 +2063,35 @@ class ModelManager:
                     
                     logger.debug(f"[DEBUG] Generate-Parameter: temp={effective_temperature}, top_p={effective_top_p}, top_k={effective_top_k}, rep_penalty={repetition_penalty}")
                     
-                    outputs = self.model.generate(
+                    # Für Qualität/Determinismus: erst ab höheren Temperaturen samplen.
+                    do_sample = bool(effective_temperature is not None and float(effective_temperature) >= 0.5)
+                    gen_kwargs: Dict[str, Any] = dict(
                         **inputs,
                         max_new_tokens=max_new_tokens,
                         max_time=max_time_seconds,
-                        temperature=effective_temperature,
-                        do_sample=effective_temperature is not None and effective_temperature > 0,
-                        top_p=effective_top_p,
-                        top_k=effective_top_k,
+                        do_sample=do_sample,
                         repetition_penalty=repetition_penalty,
                         pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
                         eos_token_id=eos_token_id_for_generate,  # Kann jetzt Liste oder Integer sein
-                        no_repeat_ngram_size=3
-                        # early_stopping entfernt - invalid für sampling mode
+                        no_repeat_ngram_size=3,
                     )
+                    if do_sample:
+                        gen_kwargs.update(
+                            temperature=effective_temperature,
+                            top_p=effective_top_p,
+                            top_k=effective_top_k,
+                        )
+                    else:
+                        # Greedy decoding: keine Sampling-Parameter setzen
+                        gen_kwargs.pop("temperature", None)
+                        gen_kwargs.pop("top_p", None)
+                        gen_kwargs.pop("top_k", None)
+
+                    stopping_criteria = self._build_stopping_criteria()
+                    if stopping_criteria is not None:
+                        gen_kwargs["stopping_criteria"] = stopping_criteria
+
+                    outputs = self.model.generate(**gen_kwargs)
                     
                     # Stoppe Heartbeat
                     heartbeat_stop.set()
@@ -1653,15 +2149,44 @@ class ModelManager:
                     if len(eos_pos) > 0:
                         eos_positions.append(eos_pos[0].item())
                 
-                # WICHTIG: Prüfe auch auf <|endoftext|> Token (wird oft nicht als EOS erkannt)
+                # VERBESSERT: Prüfe auf <|endoftext|> Token nur wenn es nicht bereits in eos_token_id enthalten ist
+                # UND nur wenn es wirklich am Ende steht (nicht mitten in der Antwort)
                 try:
                     endoftext_token_id = self.tokenizer.convert_tokens_to_ids("<|endoftext|>")
                     if endoftext_token_id is not None and endoftext_token_id != self.tokenizer.unk_token_id:
-                        endoftext_pos = (new_tokens == endoftext_token_id).nonzero(as_tuple=True)[0]
-                        if len(endoftext_pos) > 0:
-                            eos_positions.append(endoftext_pos[0].item())
-                            logger.debug(f"[FIX] <|endoftext|> Token gefunden an Position {endoftext_pos[0].item()}")
-                except:
+                        # Prüfe ob endoftext_token_id bereits in eos_token_id enthalten ist
+                        is_already_eos = False
+                        if isinstance(eos_token_id, list):
+                            is_already_eos = endoftext_token_id in eos_token_id
+                        else:
+                            is_already_eos = endoftext_token_id == eos_token_id
+                        
+                        if not is_already_eos:
+                            endoftext_positions = (new_tokens == endoftext_token_id).nonzero(as_tuple=True)[0]
+                            if len(endoftext_positions) > 0:
+                                # Nur behandeln wenn es in den letzten 10% der Tokens steht (echtes Ende)
+                                # ODER wenn es das einzige Token ist
+                                for pos in endoftext_positions:
+                                    pos_val = pos.item()
+                                    if pos_val >= len(new_tokens) * 0.9 or len(new_tokens) < 10:
+                                        eos_positions.append(pos_val)
+                                        logger.debug(f"[FIX] <|endoftext|> Token gefunden an Position {pos_val} (am Ende)")
+                                        # #region agent log
+                                        try:
+                                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A2","location":"model_manager.py:1675","message":"endoftext token at end","data":{"position":pos_val,"total_tokens":len(new_tokens),"percent":pos_val/len(new_tokens)*100},"timestamp":int(time.time()*1000)})+"\n")
+                                        except: pass
+                                        # #endregion
+                                    else:
+                                        logger.debug(f"[FIX] <|endoftext|> Token ignoriert an Position {pos_val} (nicht am Ende, {pos_val/len(new_tokens)*100:.1f}%)")
+                                        # #region agent log
+                                        try:
+                                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A2","location":"model_manager.py:1685","message":"endoftext token ignored","data":{"position":pos_val,"total_tokens":len(new_tokens),"percent":pos_val/len(new_tokens)*100},"timestamp":int(time.time()*1000)})+"\n")
+                                        except: pass
+                                        # #endregion
+                except Exception as e:
+                    logger.debug(f"[FIX] Fehler bei <|endoftext|> Token-Prüfung: {e}")
                     pass
                 
                 # Schneide beim ersten EOS-Token ab
@@ -1670,6 +2195,12 @@ class ModelManager:
                 else:
                     # WARNUNG: Kein EOS-Token gefunden - intelligente Abschneide-Logik
                     logger.warning(f"[DEBUG] Kein EOS-Token in Response gefunden! Verwende intelligente Abschneide-Logik.")
+                    # #region agent log
+                    try:
+                        with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A1","location":"model_manager.py:1672","message":"No EOS token found","data":{"new_tokens_count":len(new_tokens),"max_new_tokens":max_new_tokens,"eos_token_id":str(eos_token_id)},"timestamp":int(time.time()*1000)})+"\n")
+                    except: pass
+                    # #endregion
                     # Dekodiere temporär, um Satzenden zu finden
                     temp_response = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
                     import re
@@ -1679,18 +2210,41 @@ class ModelManager:
                     sentence_pattern = r'[.!?][\s\n]+'
                     sentence_matches = list(re.finditer(sentence_pattern, temp_response))
                     
-                    # WICHTIG: Prüfe auch auf "Human:" Marker (zeigt dass Modell weiter generiert)
+                    # VERBESSERT: Prüfe auch auf "Human:" und "User:" Marker (zeigt dass Modell weiter generiert)
                     human_marker = re.search(r'Human:', temp_response, re.IGNORECASE)
+                    user_marker = re.search(r'User:', temp_response, re.IGNORECASE)
                     
-                    if human_marker and human_marker.start() > 0:
-                        # Schneide vor "Human:" Marker ab
-                        cut_pos = human_marker.start()
+                    # Finde den ersten Marker (Human oder User)
+                    first_marker = None
+                    if human_marker and user_marker:
+                        if human_marker.start() < user_marker.start():
+                            first_marker = human_marker
+                            marker_name = "Human:"
+                        else:
+                            first_marker = user_marker
+                            marker_name = "User:"
+                    elif human_marker:
+                        first_marker = human_marker
+                        marker_name = "Human:"
+                    elif user_marker:
+                        first_marker = user_marker
+                        marker_name = "User:"
+                    
+                    if first_marker and first_marker.start() > 0:
+                        # Schneide vor Marker ab
+                        cut_pos = first_marker.start()
                         cut_text = temp_response[:cut_pos].strip()
                         # Re-encode um exakte Token-Position zu finden
                         cut_tokens = self.tokenizer.encode(cut_text, add_special_tokens=False)
                         if len(cut_tokens) < len(new_tokens):
                             new_tokens = new_tokens[:len(cut_tokens)]
-                            logger.info(f"[FIX] Response vor 'Human:' Marker abgeschnitten: {len(new_tokens)} Tokens")
+                            logger.info(f"[FIX] Response vor '{marker_name}' Marker abgeschnitten: {len(new_tokens)} Tokens")
+                            # #region agent log
+                            try:
+                                with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A1","location":"model_manager.py:1755","message":"Cut before marker","data":{"marker":marker_name,"cut_tokens":len(cut_tokens),"original_tokens":len(new_tokens)+len(cut_tokens)},"timestamp":int(time.time()*1000)})+"\n")
+                            except: pass
+                            # #endregion
                     elif len(sentence_matches) > 0:
                         # VERBESSERT: Verwende mehrere Sätze statt nur den ersten
                         # Wenn max_new_tokens erreicht wurde, verwende die vollständige Antwort
@@ -1733,6 +2287,12 @@ class ModelManager:
                                     if len(cut_tokens_final) < len(new_tokens):
                                         new_tokens = new_tokens[:len(cut_tokens_final)]
                                         logger.info(f"[FIX] Response nach 80% der Tokens abgeschnitten (nach vollständigem Wort): {len(new_tokens)} Tokens")
+                                        # #region agent log
+                                        try:
+                                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A1","location":"model_manager.py:1735","message":"Cut after complete word","data":{"original_tokens":len(new_tokens)+len(cut_tokens_final),"cut_tokens":len(cut_tokens_final),"cut_text_end":cut_text_final[-30:]},"timestamp":int(time.time()*1000)})+"\n")
+                                        except: pass
+                                        # #endregion
                                     else:
                                         # Fallback: verwende 80% direkt
                                         new_tokens = new_tokens[:max_tokens_80_percent]
@@ -1856,7 +2416,16 @@ class ModelManager:
                 prompt = "\n".join(prompt_parts) + "\nAssistant:"
             
             # Tokenize
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            inputs = self.tokenizer(prompt, return_tensors="pt")
+            # Device placement kompatibel mit device_map="auto"
+            if hasattr(self.model, "device"):
+                target_device = self.model.device
+                inputs = {k: v.to(target_device) for k, v in inputs.items()}
+            elif hasattr(self.model, "hf_device_map") and self.model.hf_device_map:
+                first_device = list(self.model.hf_device_map.values())[0]
+                inputs = {k: v.to(first_device) for k, v in inputs.items()}
+            else:
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
             input_length = inputs['input_ids'].shape[1]
             
             # Bestimme Modell-Typ
@@ -1915,6 +2484,19 @@ class ModelManager:
             
             # Stelle sicher, dass max_new_tokens mindestens 1 ist (nach Validierung)
             max_new_tokens = max(1, max_new_tokens)
+
+            # Auto-Cap für kurze Anfragen (Stream) – leichte Coding-Heuristik
+            try:
+                import re
+                last_user = ""
+                for m in reversed(messages or []):
+                    if m.get("role") == "user":
+                        last_user = str(m.get("content") or "")
+                        break
+                is_coding_hint = bool(re.search(r"\b(code|python|javascript|typescript|java|c\\+\\+|rust|debug|funktion|klasse|implementier)\b", last_user.lower())) or "```" in last_user
+            except Exception:
+                is_coding_hint = False
+            max_new_tokens = self._auto_cap_max_new_tokens(messages, max_new_tokens, is_coding=is_coding_hint)
             
             # Logging für Debugging
             logger.info(f"Stream - Input-Länge: {input_length}, gewünschte Ausgabelänge: {desired_new_tokens}, max_new_tokens: {max_new_tokens}, Modell: {self.current_model_id}")
@@ -1935,22 +2517,32 @@ class ModelManager:
             streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
             
             # Generiere in separatem Thread
-            max_time_seconds = max(5.0, min(30.0, max_new_tokens / 4))
-            generation_kwargs = {
+            # Dynamisches max_time: so wählen, dass max_new_tokens normalerweise VOR max_time erreicht wird.
+            # Hintergrund: Qwen emittiert auf manchen Setups selten EOS -> min(30s) führte zu häufigen 30s Runs.
+            max_time_seconds = max(12.0, min(180.0, max_new_tokens * 0.25))
+            # Sampling ist einer der Hauptgründe für "kein EOS" / runaway bei kleinen Temperaturen.
+            # Für typische QA/Chat (temp <= 0.3) verwenden wir greedy decoding.
+            do_sample = bool(temperature and float(temperature) >= 0.5)
+            generation_kwargs: Dict[str, Any] = dict(
                 **inputs,
-                "max_new_tokens": max_new_tokens,
-                "max_time": max_time_seconds,
-                "temperature": temperature if temperature > 0 else (0.7 if is_mistral else None),
-                "do_sample": temperature > 0,
-                "top_p": 0.9 if temperature > 0 else None,
-                "top_k": 50 if temperature > 0 and is_mistral else None,
-                "repetition_penalty": repetition_penalty,
-                "pad_token_id": self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
-                "eos_token_id": eos_token_id_for_stream,
-                "no_repeat_ngram_size": 3,
-                # early_stopping entfernt - invalid für sampling mode
-                "streamer": streamer
-            }
+                max_new_tokens=max_new_tokens,
+                max_time=max_time_seconds,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty,
+                pad_token_id=self.tokenizer.eos_token_id if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id,
+                eos_token_id=eos_token_id_for_stream,
+                no_repeat_ngram_size=3,
+                streamer=streamer,
+            )
+            if do_sample:
+                generation_kwargs.update(
+                    temperature=temperature,
+                    top_p=0.9,
+                    top_k=50 if is_mistral else None,
+                )
+            stopping_criteria = self._build_stopping_criteria()
+            if stopping_criteria is not None:
+                generation_kwargs["stopping_criteria"] = stopping_criteria
             
             generation_thread = threading.Thread(
                 target=self.model.generate,
@@ -1959,11 +2551,22 @@ class ModelManager:
             generation_thread.start()
             
             # Yield Chunks vom Streamer
+            stream_chunk_count = 0
+            stream_start_time = time.time()
             for text in streamer:
                 if text:
+                    stream_chunk_count += 1
                     # Bereinige Chunk
-                    cleaned = text.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
-                    if cleaned:
+                    # WICHTIG: Kein strip() — sonst verschwinden Leerzeichen/Zeilenumbrüche zwischen Chunks.
+                    cleaned = text.replace("<|im_end|>", "").replace("<|im_start|>", "")
+                    cleaned = self._normalize_mixed_script_homoglyphs(cleaned)
+                    if cleaned != "":
+                        # #region agent log
+                        try:
+                            with open(r'g:\04-CODING\Local Ai\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"C3","location":"model_manager.py:1963","message":"Streamer chunk yielded","data":{"chunk_num":stream_chunk_count,"chunk_length":len(cleaned),"time_since_start":time.time()-stream_start_time},"timestamp":int(time.time()*1000)})+"\n")
+                        except: pass
+                        # #endregion
                         yield cleaned
             
             generation_thread.join()

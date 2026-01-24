@@ -2,7 +2,7 @@
   "hotkey": "alt+1",
   "recording_mode": "toggle",
   "threshold": 0.0,
-  "language": "",
+  "language": "en",
   "auto_start": true,
   "api_base": "http://127.0.0.1:8000",
   "silence_threshold": 0.001,

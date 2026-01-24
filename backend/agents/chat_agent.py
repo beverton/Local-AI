@@ -8,6 +8,9 @@ import logging
 import re
 import json
 import time
+from tool_detection import detect_web_search_query
+from file_content_extractor import extract_write_file_content
+from confirm_policy import parse_confirm_delete
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,17 +24,19 @@ class ChatAgent(BaseAgent):
         super().__init__(agent_id, conversation_id, model_id, config)
         self.agent_type = "chat_agent"
         self.name = "Chat Agent"
-        self.system_prompt = """Du bist ein hilfreicher AI-Assistent. Antworte NUR auf Deutsch.
+        self.system_prompt = """Du bist ein hilfreicher AI-Assistent ähnlich Perplexity AI. Antworte NUR auf Deutsch.
 
-KRITISCH - Tool-Ergebnisse nutzen:
+KRITISCH - Tool-Ergebnisse/Quellen nutzen:
 Wenn dir Tool-Ergebnisse (Web-Suche, Dateien) gezeigt werden:
-1. Nutze AUSSCHLIESSLICH diese Informationen - dein Wissen ist veraltet
-2. Kopiere URLs EXAKT wie gezeigt - keine Leerzeichen, keine Änderungen
+1. Nutze AUSSCHLIESSLICH diese Informationen (dein internes Wissen ist veraltet)
+2. Kopiere URLs EXAKT wie gezeigt (keine Leerzeichen/Änderungen)
 3. Tool-Ergebnisse haben IMMER Vorrang vor deinem internen Wissen
+4. Wenn Quellen/URLs vorhanden sind: referenziere sie als [1], [2], ... und erfinde keine zusätzlichen Quellen
 
-Beispiel: Wenn Tool zeigt "X ist Y seit 2025" aber du glaubst "X ist Z" → Tool hat Recht, antworte mit "X ist Y seit 2025".
-
-Antworte präzise, klar und ausschließlich auf Deutsch."""
+Für Antworten:
+- Antworte präzise und direkt (keine Wiederholung von System/User-Text)
+- Für Code: verwende Markdown Code-Blöcke mit Sprach-Tag, vollständig und ausführbar
+"""
         
         # Verfügbare Tools
         self.available_tools = [
@@ -52,54 +57,34 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         """
         message_lower = message.lower()
         message_original = message
+
+        def _sanitize_user_path_fragment(p: str) -> str:
+            """
+            Normalisiert einen vom User/Regex extrahierten Pfad:
+            - entfernt Quotes/Backticks
+            - entfernt trailing Satzzeichen (z.B. '?', '.', ')', ']')
+            """
+            if not p:
+                return ""
+            p = p.strip().strip('"\''"`")
+            # Entferne umschließende Klammern
+            if (p.startswith("(") and p.endswith(")")) or (p.startswith("[") and p.endswith("]")) or (p.startswith("{") and p.endswith("}")):
+                p = p[1:-1].strip()
+            # Entferne trailing punctuation / whitespace
+            p = re.sub(r'[\s\)\]\}\.,;:!?]+$', '', p).strip()
+            # Nochmals Quotes/Backticks
+            p = p.strip().strip('"\''"`")
+            return p
         
-        # WebSearch Patterns - mit verbesserter Erkennung
-        # WICHTIG: Patterns die mit Fragen beginnen haben Priorität (wer/was/wo/wann/wie)
-        web_search_patterns = [
-            # Fragewörter - HOHE PRIORITÄT (extrahieren das Thema direkt)
-            r"^(.+?)\?.*?(?:suche|finde|google|web|website)",  # "Wer ist X? Suche..." -> "Wer ist X"
-            r"wer\s+(?:ist|sind|war|waren)\s+(.+?)(?:\?|$)",  # "Wer ist...?"
-            r"was\s+(?:ist|wird|sind|war|bedeutet)\s+(.+?)(?:\?|$)",  # "Was ist...?"
-            r"wo\s+(?:ist|sind|finde\s+ich|liegt|befindet\s+sich)\s+(.+?)(?:\?|$)",  # "Wo ist...?"
-            r"wann\s+(?:ist|war|findet|beginnt)\s+(.+?)(?:\?|$)",  # "Wann ist...?"
-            r"wie\s+(?:viel|viele|teuer|hoch)\s+(.+?)(?:\?|$)",  # "Wie viel...?"
-            # Such-Keywords mit spezifischem Kontext
-            r"(?:suche|finde|google)\s+(?:nach\s+)?(?:informationen\s+)?(?:über|zu)\s+(.+)",  # "suche nach Infos über X"
-            r"website\s+(?:von|für|über|zu)\s+(.+)",  # "Website von X"
-            r"webseite\s+(?:von|für|über|zu)\s+(.+)",  # "Webseite von X"
-            # Wetter-spezifisch
-            r"wetter\s+(?:in|für|heute|morgen)\s+(.+)",  # "Wetter in..."
-            r"wettervorhersage\s+(?:für|in)\s+(.+)",  # "Wettervorhersage für..."
-            # News/Aktualität
-            r"(?:aktuelle|neueste)\s+(?:informationen|infos|news|nachrichten)\s+(?:über|zu|von)\s+(.+)",
-            # Generische Such-Keywords - NIEDRIGE PRIORITÄT (am Ende)
-            r"(?:suche|finde|google)\s+(.+)",  # Generisch: "suche X"
-        ]
-        
-        # URL-Erkennung
-        url_pattern = r"https?://[^\s]+"
-        if re.search(url_pattern, message):
-            # Wenn URL erwähnt wird, könnte WebSearch nützlich sein
-            query = re.search(r"suche|finde|google|was|wer", message_lower)
-            if query:
-                return {"tool_name": "web_search", "params": {"query": message}}
-        
-        for pattern in web_search_patterns:
-            match = re.search(pattern, message_lower)
-            if match:
-                query = match.group(1).strip()
-                
-                # Bereinige Query: Entferne trailing Punkte/Kommas und Such-Keywords am Ende
-                query = re.sub(r'[,\.;]+$', '', query)  # Entferne trailing Satzzeichen
-                query = re.sub(r'\s+(?:suche|finde|google|web|website|webseite|link|url).*$', '', query)  # Entferne Such-Keywords am Ende
-                query = query.strip()
-                
-                if len(query) > 3:  # Mindestlänge für sinnvolle Suche
-                    return {"tool_name": "web_search", "params": {"query": query}}
+        # WebSearch Erkennung (zentralisiert, kein doppelter Pattern-Code)
+        query = detect_web_search_query(message_original)
+        if query:
+            return {"tool_name": "web_search", "params": {"query": query}}
         
         # Datei-Operation Patterns
         # read_file - Erweiterte Patterns für natürlichere Formulierungen
         read_patterns = [
+            r"lies\s+(?:die\s+)?(?:datei\s+)?(.+)",
             r"lese\s+(?:die\s+)?(?:datei\s+)?(.+)",
             r"zeige\s+(?:mir\s+)?(?:den\s+)?(?:inhalt\s+)?(?:der\s+)?(?:datei\s+)?(.+)",
             r"öffne\s+(?:die\s+)?(?:datei\s+)?(.+)",
@@ -117,9 +102,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         for pattern in read_patterns:
             match = re.search(pattern, message_lower)
             if match:
-                file_path = match.group(1).strip()
-                # Entferne Anführungszeichen
-                file_path = file_path.strip('"\'')
+                file_path = _sanitize_user_path_fragment(match.group(1))
                 if file_path:
                     return {"tool_name": "read_file", "params": {"file_path": file_path}}
         
@@ -127,11 +110,13 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         write_patterns = [
             r"schreibe\s+(?:in\s+)?(?:die\s+)?(?:datei\s+)?(.+?)\s+(?:den\s+)?(?:inhalt\s+)?(.+)",
             r"speichere\s+(?:in\s+)?(?:die\s+)?(?:datei\s+)?(.+?)\s+(?:den\s+)?(?:inhalt\s+)?(.+)",
+            # Multiline / "erstelle ... mit folgendem Inhalt:"
+            r"(?s)(?:erstelle|erzeuge)\s+(?:eine\s+)?datei\s+(.+?)\s+(?:mit\s+(?:folgendem\s+)?inhalt|inhalt)\s*[:\n]\s*(.+)$",
         ]
         for pattern in write_patterns:
             match = re.search(pattern, message_original, flags=re.IGNORECASE)
             if match:
-                file_path = match.group(1).strip().strip('"\'')
+                file_path = _sanitize_user_path_fragment(match.group(1))
                 content = match.group(2).strip()
                 if file_path and content:
                     return {"tool_name": "write_file", "params": {"file_path": file_path, "content": content}}
@@ -145,7 +130,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         for pattern in list_patterns:
             match = re.search(pattern, message_lower)
             if match:
-                dir_path = match.group(1).strip().strip('"\'')
+                dir_path = _sanitize_user_path_fragment(match.group(1))
                 if not dir_path or dir_path == ".":
                     dir_path = "."
                 return {"tool_name": "list_directory", "params": {"directory_path": dir_path}}
@@ -158,7 +143,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         for pattern in delete_patterns:
             match = re.search(pattern, message_lower)
             if match:
-                file_path = match.group(1).strip().strip('"\'')
+                file_path = _sanitize_user_path_fragment(match.group(1))
                 if file_path:
                     return {"tool_name": "delete_file", "params": {"file_path": file_path}}
         
@@ -170,7 +155,7 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         for pattern in exists_patterns:
             match = re.search(pattern, message_lower)
             if match:
-                file_path = match.group(1).strip().strip('"\'')
+                file_path = _sanitize_user_path_fragment(match.group(1))
                 if file_path:
                     return {"tool_name": "file_exists", "params": {"file_path": file_path}}
         
@@ -219,35 +204,155 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
         """Generiert eine Antwort, nutzt automatisch Tools wenn nötig"""
         if not self.model_manager:
             raise RuntimeError("ModelManager nicht gesetzt")
+
+        # Confirmation fast-path (destructive ops)
+        confirmed_delete = parse_confirm_delete(message or "")
+        if confirmed_delete:
+            try:
+                self.execute_tool("delete_file", file_path=confirmed_delete)
+                return f"Datei gelöscht: `{confirmed_delete}`"
+            except Exception as e:
+                return f"Fehler beim Löschen: {e}"
         
         # HINWEIS: Modell-Laden wird von main.py/Model-Service gehandhabt
         # Keine redundante Prüfung hier, da bei Model-Service das Modell
         # nicht im lokalen model_manager geladen ist
         
-        # Erkenne Tool-Bedarf
-        tool_info = self._detect_tool_need(message)
-        tool_result = None
-        tool_used = None
-        
-        if tool_info:
-            tool_name = tool_info["tool_name"]
-            tool_params = tool_info["params"]
-            
-            # WICHTIG: Prüfe ob Tool durch UI-Toggle aktiviert ist
-            if not self._is_tool_enabled(tool_name):
-                logger.debug(f"Tool '{tool_name}' ist durch UI-Toggle deaktiviert - überspringe Tool-Nutzung")
-                tool_info = None  # Überspringe Tool-Nutzung
-            else:
-                try:
-                    logger.info(f"ChatAgent nutzt Tool: {tool_name} mit Parametern: {tool_params}")
-                    tool_result = self.execute_tool(tool_name, **tool_params)
-                    tool_used = tool_name
-                except Exception as e:
-                    logger.error(f"Fehler bei Tool-Ausführung {tool_name}: {e}")
-                    tool_result = f"Fehler bei Tool-Ausführung: {str(e)}"
+        # Konfiguration für Generierung
+        effective_max_length = self.config.get("max_length", 1024)
+        effective_temperature = self.config.get("temperature", 0.7)
+
+        # 1) Function Calling (wenn möglich) -> danach Tool-Ausführung -> dann Antwort generieren
+        #    Falls Function Calling nicht klappt/keine Tool-Calls: Fallback auf Pattern-Matching.
+        used_function_calling = False
+        tool_results: List[Dict[str, Any]] = []  # [{"name":..., "result":...}, ...]
+
+        use_model_service = bool(self.model_service_client and self.model_service_client.is_available())
+        if not use_model_service and hasattr(self.model_manager, "generate_with_tools"):
+            try:
+                from tool_definitions import get_openai_tool_definitions
+
+                enable_web_search = self._is_tool_enabled("web_search")
+                tools = get_openai_tool_definitions(enable_web_search=enable_web_search)
+
+                # Messages für Tool-Entscheidung (ohne Tool-Ergebnisse)
+                fc_messages: List[Dict[str, str]] = []
+                if self.system_prompt:
+                    fc_messages.append({"role": "system", "content": self.system_prompt})
+
+                history_to_use = self.message_history[:-1] if len(self.message_history) > 1 else []
+                recent_history = history_to_use[-10:] if len(history_to_use) > 10 else history_to_use
+                for msg in recent_history:
+                    if msg["role"] == "user" or msg["role"].startswith("agent_"):
+                        fc_messages.append({"role": "user", "content": msg["content"]})
+                    elif msg["role"] == "assistant":
+                        fc_messages.append({"role": "assistant", "content": msg["content"]})
+                fc_messages.append({"role": "user", "content": message})
+
+                # Tool-Entscheidung: deterministisch, kurze Ausgabe
+                fc = self.model_manager.generate_with_tools(
+                    fc_messages,
+                    tools=tools,
+                    max_length=min(256, int(effective_max_length)),
+                    temperature=0.0,
+                )
+                calls = fc.get("tool_calls") or []
+                if calls:
+                    for call in calls:
+                        tool_name = (call or {}).get("name")
+                        tool_args = (call or {}).get("arguments", {})
+                        if not tool_name:
+                            continue
+                        if not self._is_tool_enabled(tool_name):
+                            logger.debug(f"Tool '{tool_name}' ist durch UI-Toggle deaktiviert - überspringe Function-Calling Tool")
+                            continue
+                        try:
+                            logger.info(f"ChatAgent (Function Calling) nutzt Tool: {tool_name} mit Parametern: {tool_args}")
+                            res = self.execute_tool(tool_name, **(tool_args if isinstance(tool_args, dict) else {}))
+                        except Exception as e:
+                            logger.error(f"Fehler bei Tool-Ausführung {tool_name}: {e}")
+                            res = f"Fehler bei Tool-Ausführung: {str(e)}"
+                        tool_results.append({"name": tool_name, "result": res})
+
+                    used_function_calling = len(tool_results) > 0
+            except Exception as e:
+                logger.debug(f"Function Calling fehlgeschlagen, fallback auf Pattern-Matching: {e}")
+
+        # 2) Fallback: Pattern-Matching (nur wenn Function Calling nicht genutzt wurde)
+        if not used_function_calling:
+            tool_info = self._detect_tool_need(message)
+            if tool_info:
+                tool_name = tool_info["tool_name"]
+                tool_params = tool_info["params"]
+
+                if not self._is_tool_enabled(tool_name):
+                    logger.debug(f"Tool '{tool_name}' ist durch UI-Toggle deaktiviert - überspringe Tool-Nutzung")
+                    # Web-Suche explizit angefragt, aber deaktiviert -> deterministisch antworten (kein Halluzinieren von URLs)
+                    if tool_name == "web_search":
+                        return "Web-Suche ist deaktiviert (auto_web_search=false). Bitte aktiviere sie in den Quality-Settings, oder stelle die Frage ohne Web-Recherche."
+                else:
+                    # Confirm-Policy: delete_file immer bestätigen
+                    if tool_name == "delete_file":
+                        msg_l = (message or "").strip()
+                        fp = (tool_params or {}).get("file_path", "")
+                        # akzeptiere einfache Bestätigung: "CONFIRM DELETE <path>"
+                        if not (msg_l.upper().startswith("CONFIRM DELETE") and fp and fp in msg_l):
+                            return f"Zum Löschen brauche ich eine Bestätigung. Bitte antworte mit: **CONFIRM DELETE {fp}**"
+                    # write_file safety: content extraction (centralized)
+                    if tool_name == "write_file":
+                        c = (tool_params or {}).get("content")
+                        if not isinstance(c, str) or not c.strip():
+                            extracted = extract_write_file_content(message or "")
+                            if extracted:
+                                tool_params["content"] = extracted
+                            else:
+                                return "Für `write_file` fehlt der Inhalt. Bitte sende den Inhalt (am besten in einem ```code``` Block)."
+                    try:
+                        logger.info(f"ChatAgent nutzt Tool: {tool_name} mit Parametern: {tool_params}")
+                        res = self.execute_tool(tool_name, **tool_params)
+                    except Exception as e:
+                        logger.error(f"Fehler bei Tool-Ausführung {tool_name}: {e}")
+                        res = f"Fehler bei Tool-Ausführung: {str(e)}"
+                    tool_results.append({"name": tool_name, "result": res})
+
+                    # Wenn es eine direkte File-Tool-Anfrage ist, antworte deterministisch aus Tool-Result
+                    try:
+                        msg_l = (message or "").lower()
+                        # "und gib mir X" ist bei Tool-Befehlen normal, gilt nicht als Analyse
+                        wants_analysis = any(k in msg_l for k in [" danach", " erkl", " analys", " zusammenfass", " bewert", " vergleic", " finde fehler", " warum"])
+
+                        allow_direct = (not wants_analysis) and tool_name in ["read_file", "write_file", "list_directory", "delete_file", "file_exists"]
+                        # Web-Suche: direct response fast immer besser (korrekte URLs), außer wenn explizit Erklärung/Analyse verlangt wird
+                        if tool_name == "web_search" and not wants_analysis:
+                            allow_direct = True
+
+                        if allow_direct:
+                            if tool_name == "read_file":
+                                return f"Inhalt von `{tool_params.get('file_path','')}`:\n\n{res}"
+                            if tool_name == "write_file":
+                                return f"Datei geschrieben: `{tool_params.get('file_path','')}`"
+                            if tool_name == "delete_file":
+                                return f"Datei gelöscht: `{tool_params.get('file_path','')}`"
+                            if tool_name == "file_exists":
+                                exists = bool(res)
+                                return f"Datei `{tool_params.get('file_path','')}` existiert: {exists}"
+                            if tool_name == "list_directory":
+                                return f"Inhalt von `{tool_params.get('directory_path','')}`:\n\n{json.dumps(res, ensure_ascii=False, indent=2) if isinstance(res,(dict,list)) else str(res)}"
+                            if tool_name == "web_search":
+                                if isinstance(res, dict) and isinstance(res.get("results"), list):
+                                    lines = []
+                                    for i, item in enumerate(res.get("results", [])[:5], 1):
+                                        title = (item or {}).get("title", f"Quelle {i}")
+                                        url = (item or {}).get("url", "")
+                                        snippet = (item or {}).get("snippet", "")
+                                        lines.append(f"[{i}] {title}\n{snippet}\nURL: {url}".strip())
+                                    return "Web-Suche Ergebnisse:\n\n" + "\n\n".join(lines)
+                                return f"Web-Suche Ergebnis:\n\n{json.dumps(res, ensure_ascii=False, indent=2) if isinstance(res,(dict,list)) else str(res)}"
+                    except Exception:
+                        pass
         
         # Erstelle Messages für Modell
-        messages = []
+        messages: List[Dict[str, str]] = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         
@@ -263,33 +368,40 @@ Antworte präzise, klar und ausschließlich auf Deutsch."""
             elif msg["role"] == "assistant":
                 messages.append({"role": "assistant", "content": msg["content"]})
         
-        # Aktuelle Nachricht mit Tool-Ergebnissen
+        # Aktuelle Nachricht mit Tool-Ergebnissen (0..n Tools)
         user_message = message
-        if tool_result is not None:
-            # Formatiere Tool-Ergebnis für bessere Verarbeitung durch das Modell
-            if isinstance(tool_result, dict):
-                # Spezielle Formatierung für Web-Suche
-                if tool_used == "web_search" and "results" in tool_result:
+        tool_used = None
+        web_search_result_for_url_fix = None
+        if tool_results:
+            blocks: List[str] = []
+            for tr in tool_results:
+                tname = tr.get("name")
+                tres = tr.get("result")
+                if not tool_used:
+                    tool_used = tname
+                # Formatiere Tool-Ergebnis
+                if isinstance(tres, dict) and tname == "web_search" and "results" in tres:
+                    web_search_result_for_url_fix = tres
                     tool_result_str = "Web-Suche Ergebnisse:\n"
-                    for i, result in enumerate(tool_result.get("results", [])[:5], 1):
+                    for i, result in enumerate(tres.get("results", [])[:5], 1):
                         title = result.get("title", "Kein Titel")
                         snippet = result.get("snippet", "Keine Beschreibung")
                         url = result.get("url", "")
                         tool_result_str += f"\n{i}. {title}\n   {snippet}\n"
                         if url:
                             tool_result_str += f"   URL: {url}\n"
-                    if tool_result.get("summary"):
-                        tool_result_str += f"\n{tool_result['summary']}\n"
+                    if tres.get("summary"):
+                        tool_result_str += f"\n{tres['summary']}\n"
+                elif isinstance(tres, (dict, list)):
+                    tool_result_str = json.dumps(tres, ensure_ascii=False, indent=2)
                 else:
-                    # Andere Tool-Ergebnisse als JSON
-                    tool_result_str = json.dumps(tool_result, ensure_ascii=False, indent=2)
-            else:
-                tool_result_str = str(tool_result)
-            
+                    tool_result_str = str(tres)
+
+                blocks.append(f"TOOL-ERGEBNIS [{tname}]:\n{tool_result_str}")
+
             user_message = f"""FRAGE: {message}
 
-TOOL-ERGEBNIS [{tool_used}]:
-{tool_result_str}
+{'\n\n'.join(blocks)}
 
 WICHTIG: Nutze NUR die Tool-Ergebnisse oben, nicht dein internes Wissen. Kopiere URLs exakt wie gezeigt.
 
@@ -315,8 +427,6 @@ Antworte auf Deutsch:"""
         
         # Generiere Antwort
         try:# 🔥 MODEL SERVICE SUPPORT - Verwende Model Service Client wenn verfügbar
-            effective_max_length = self.config.get("max_length", 1024)
-            effective_temperature = self.config.get("temperature", 0.7)
             if self.model_service_client and self.model_service_client.is_available():
                 # Verwende Model Service
                 result = self.model_service_client.chat(
@@ -359,8 +469,15 @@ Antworte auf Deutsch:"""
             
             # POST-PROCESSING: Korrigiere URLs aus Tool-Ergebnissen
             # Verhindert Tippfehler beim Abschreiben von URLs durch das Modell
-            if tool_used == "web_search" and tool_result and isinstance(tool_result, dict):
-                cleaned_response = self._fix_urls_in_response(cleaned_response, tool_result)
+            if tool_used == "web_search" and web_search_result_for_url_fix and isinstance(web_search_result_for_url_fix, dict):
+                cleaned_response = self._fix_urls_in_response(cleaned_response, web_search_result_for_url_fix)
+
+            # Post-Processing: Normalisiere gemischte Alphabete (z.B. kyrillische Homoglyphen)
+            try:
+                if hasattr(self.model_manager, "_normalize_mixed_script_homoglyphs"):
+                    cleaned_response = self.model_manager._normalize_mixed_script_homoglyphs(cleaned_response)
+            except Exception:
+                pass
             
             # POST-PROCESSING: Entferne nicht-deutsche Sprachen (z.B. Chinesisch)
             # 🔧 DEAKTIVIERT: Diese Funktion ist zu aggressiv und entfernt wichtige Zeichen aus URLs

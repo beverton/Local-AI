@@ -5,5 +5,5 @@
   "actuality_check": false,
   "source_quality_check": false,
   "completeness_check": false,
-  "auto_web_search": false
+  "auto_web_search": true
 }

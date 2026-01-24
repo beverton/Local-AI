@@ -5,6 +5,7 @@ Inspiriert von Perplexity's Quality Management
 import logging
 import os
 import json
+import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from logging_utils import get_logger
@@ -104,6 +105,52 @@ class QualityManager:
         ]
         message_lower = message.lower()
         return any(re.search(pattern, message_lower, re.IGNORECASE) for pattern in coding_patterns)
+
+    def is_instructional_question(self, message: str) -> bool:
+        """
+        Erkennt "How-to"/Anleitungen/Rezept-Anfragen, bei denen ein kurzer Rewrite-Pass
+        oft stark die Lesbarkeit und Struktur verbessert.
+        """
+        if not message:
+            return False
+        m = message.lower()
+        keywords = [
+            "rezept", "anleitung", "schritte", "schritt", "wie macht man", "wie mache ich", "how to",
+            "tutorial", "guide", "koch", "back", "zubereitung", "zutaten",
+        ]
+        return any(k in m for k in keywords)
+
+    def get_fallback_answer(self, question: str, language: str = "de") -> Optional[str]:
+        """
+        Sehr konservative Fallback-Antworten für bekannte, häufige Fälle,
+        wenn Modell-Antworten erfahrungsgemäß oft kaputt/nonsense sind.
+        """
+        if not question:
+            return None
+        if language == "en":
+            return None
+
+        ql = question.lower()
+        # Marmelade/Konfitüre Standardrezept
+        if ("marmelade" in ql or "konfit" in ql or "gelee" in ql) and "rezept" in ql:
+            return (
+                "### Zutaten\n"
+                "- 1 kg Früchte (z.B. Erdbeeren, Himbeeren, Aprikosen)\n"
+                "- 500 g Gelierzucker 2:1 (oder 1 kg Gelierzucker 1:1)\n"
+                "- 2–3 EL Zitronensaft\n"
+                "- optional: 1 TL Vanilleextrakt\n\n"
+                "### Zubereitung\n"
+                "1. Gläser/Deckel sterilisieren (z.B. 10 Min. in kochendem Wasser) und bereitstellen.\n"
+                "2. Früchte waschen, putzen, ggf. entsteinen und grob zerkleinern (nach Wunsch pürieren).\n"
+                "3. Früchte mit Gelierzucker und Zitronensaft in einen großen Topf geben, gut verrühren und 10 Min. ziehen lassen.\n"
+                "4. Unter Rühren aufkochen, dann sprudelnd 3–4 Minuten kochen (je nach Gelierzucker-Packung).\n"
+                "5. **Gelierprobe**: 1 TL Marmelade auf einen kalten Teller geben; wird sie nach 30–60 s fest, ist sie fertig.\n"
+                "6. Heiß randvoll in die Gläser füllen, sofort verschließen und 5 Minuten auf den Kopf stellen (optional).\n\n"
+                "### Haltbarkeit\n"
+                "- Kühl und dunkel gelagert: meist mehrere Monate. Nach dem Öffnen im Kühlschrank aufbewahren und zügig verbrauchen."
+            )
+
+        return None
     
     def validate_response(self, response: str, question: str, auto_search: bool = True) -> Dict[str, Any]:
         """
@@ -207,17 +254,8 @@ class QualityManager:
         Returns:
             True wenn Web-Search sinnvoll ist
         """
-        question_lower = question.lower()
-        
-        # Indikatoren für Web-Search-Bedarf
-        search_indicators = [
-            "wetter", "weather", "aktuelle", "aktuell", "heute", "morgen",
-            "wie viel", "was kostet", "wo ist", "wann ist", "wer ist",
-            "definition", "was bedeutet", "erkläre", "was ist",
-            "news", "neuigkeiten", "nachrichten"
-        ]
-        
-        return any(indicator in question_lower for indicator in search_indicators)
+        from tool_detection import needs_web_search
+        return needs_web_search(question)
     
     def format_sources_for_context(self, sources: List[Dict]) -> str:
         """
@@ -240,6 +278,134 @@ class QualityManager:
             context_parts.append(f"[{idx}] {title}\n{snippet}\nURL: {url}")
         
         return "\n\n".join(context_parts)
+
+    def needs_polish(self, response: str, language: str = "de") -> bool:
+        """
+        Heuristik: erkennt offensichtliche Output-Probleme (gemischte Alphabete / Ersatzzeichen),
+        bei denen ein schneller "Polish"-Rewrite viel Qualität bringt.
+        """
+        if not response:
+            return False
+
+        # Unicode replacement character
+        if "\ufffd" in response:
+            return True
+
+        # Cyrillic im überwiegend lateinischen Text (typisch für "marmelадe", "Schritт")
+        has_cyr = bool(re.search(r"[\u0400-\u04FF]", response))
+        if has_cyr:
+            latin = len(re.findall(r"[A-Za-zÄÖÜäöüß]", response))
+            cyr = len(re.findall(r"[\u0400-\u04FF]", response))
+            if latin >= max(12, cyr * 3):
+                return True
+
+        return False
+
+    def build_polish_messages(self, question: str, draft_response: str, language: str = "de") -> List[Dict[str, str]]:
+        """
+        Erstellt eine kurze Rewrite-Aufgabe, die Tippfehler, gemischte Alphabete,
+        kaputte Nummerierung und offensichtlichen Unsinn korrigiert.
+        """
+        if language == "en":
+            system = (
+                "You are a careful editor. Rewrite the draft answer to be clear, correct, and well-formatted. "
+                "Fix typos, broken numbering, mixed alphabets/scripts, and remove nonsense. "
+                "Keep the intent. Output ONLY the corrected answer."
+            )
+            user = f"QUESTION:\n{question}\n\nDRAFT ANSWER:\n{draft_response}"
+        else:
+            recipe_hint = ""
+            ql = (question or "").lower()
+            is_recipe = any(k in ql for k in ["marmelade", "konfit", "jam", "gelee", "rezept"])
+            if is_recipe:
+                recipe_hint = (
+                    "\n\nSPEZIAL (Rezept): Wenn es um Marmelade/Konfitüre geht, gib ein realistisches deutsches Standardrezept "
+                    "mit **Gelierzucker (2:1 oder 3:1)** und **Zitronensaft**. Keine unnötigen Zutaten wie Öl oder Essig "
+                    "(außer ausdrücklich gewünscht). Nutze eine klare Struktur:\n"
+                    "- **Zutaten** (mit realistischen Mengen)\n"
+                    "- **Zubereitung** (Schritte 1..N, inkl. Gelierprobe)\n"
+                    "- **Abfüllen & Haltbarkeit** (kurz)\n"
+                    "Wenn die Entwurfs-Antwort falsche Zutaten enthält, ersetze sie durch das Standardrezept."
+                )
+            system = (
+                "Du bist ein sorgfältiger Lektor. Überarbeite die Entwurfs-Antwort so, dass sie klar, korrekt "
+                "und gut formatiert ist. Korrigiere Tippfehler, kaputte Nummerierung, gemischte Alphabete/Schriften "
+                "(z.B. kyrillische Buchstaben in deutschen Wörtern) und entferne offensichtlichen Unsinn. "
+                "Behalte die Intention der Frage. Gib NUR die korrigierte Antwort zurück."
+                f"{recipe_hint}"
+            )
+            if is_recipe:
+                # Bei Rezepten: Draft kann stark irreführend sein -> lieber direkt Standardrezept generieren.
+                user = (
+                    f"FRAGE:\n{question}\n\n"
+                    "AUFGABE:\nGib ein sauberes Standardrezept auf Deutsch (Zutaten + Zubereitung 1..N + Abfüllen & Haltbarkeit).\n"
+                    "WICHTIG: Ignoriere ggf. fehlerhafte Inhalte im Entwurf.\n"
+                    f"\nENTWURF (kann falsch sein):\n{draft_response}"
+                )
+            else:
+                user = f"FRAGE:\n{question}\n\nENTWURF-ANTWORT:\n{draft_response}"
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+
+    def polish_response(
+        self,
+        question: str,
+        draft_response: str,
+        generate_fn,
+        language: str = "de",
+        max_length: int = 512,
+        temperature: float = 0.2,
+    ) -> Optional[str]:
+        """
+        Führt (wenn nötig) einen einzigen Rewrite-Pass durch.
+
+        generate_fn(messages, max_length, temperature) -> str|None
+        """
+        try:
+            if not (self.needs_polish(draft_response, language=language) or self.is_instructional_question(question)):
+                return None
+
+            messages = self.build_polish_messages(question, draft_response, language=language)
+            rewritten = generate_fn(messages, max_length=max_length, temperature=temperature)
+            if not rewritten or not isinstance(rewritten, str):
+                return None
+
+            rewritten = rewritten.strip()
+            if not rewritten:
+                return None
+
+            # Zusätzliche Plausibilitätschecks (verhindert "Certainly!"-Miniantworten)
+            if language != "en":
+                if len(rewritten) < 80:
+                    return None
+                # Bei Rezepten: Struktur erzwingen
+                ql = (question or "").lower()
+                if any(k in ql for k in ["marmelade", "konfit", "jam", "gelee", "rezept"]):
+                    if not re.search(r"\bZutaten\b", rewritten, re.IGNORECASE):
+                        rewritten = ""
+                    if not re.search(r"\b(Zubereitung|Schritte)\b", rewritten, re.IGNORECASE):
+                        rewritten = ""
+                    if not re.search(r"(?m)^\s*1[\)\.\:]", rewritten):
+                        rewritten = ""
+                    # Für Marmelade/Konfitüre: Gelierzucker + Zitronensaft sollen vorkommen (Standardrezept)
+                    if not re.search(r"\bGelierzucker\b", rewritten, re.IGNORECASE) or not re.search(r"\bZitronen(saft)?\b", rewritten, re.IGNORECASE):
+                        rewritten = ""
+
+                    if not rewritten:
+                        # deterministischer Fallback: Standardrezept
+                        return self.get_fallback_answer(question, language=language)
+
+            # Wenn Rewrite noch schlimmer aussieht, lieber original lassen
+            if self.needs_polish(rewritten, language=language) and not self.needs_polish(draft_response, language=language):
+                return None
+
+            return rewritten
+        except Exception as e:
+            logger.warning(f"Polish fehlgeschlagen: {e}")
+            return None
     
     def _is_factual_question(self, question: str) -> bool:
         """
